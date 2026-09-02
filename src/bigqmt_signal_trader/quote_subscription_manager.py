@@ -18,16 +18,51 @@ publish never stalls quote-thread state, and no callback can deadlock.
 
 import threading
 
+from .code_utils import normalize_stock_code
+
+
+def normalize_subscription_code(code):
+    """One code as big QMT wants it -- and futures keep their case (#95).
+
+    This used to be a plain ``.upper()``, which is right for the exchange
+    tokens (SH / SZ / IF ...) and wrong for every futures contract, because
+    those symbols are lowercase: ``cu2610.SF`` went to QMT as ``CU2610.SF``,
+    a contract it does not have, so the subscription produced no pushes at
+    all. The reporter saw exactly that -- ``CF701.ZF`` ticking every 250ms
+    while ``cu2610.SF`` delivered one frame and then nothing. The one frame
+    was the initial snapshot, which takes the case-preserving get_full_tick
+    path; the subscription behind it was already dead.
+
+    normalize_stock_code keeps the caller's symbol verbatim for the
+    case-sensitive suffixes (.SF .DF .IF .ZF .INE .GF -- issue #58) but
+    rejects a bare exchange token, so tokens are handled here instead.
+    """
+    text = str(code or "").strip()
+    if not text:
+        return ""
+    if "." not in text:
+        return text.upper()          # exchange token: SH / SZ / BJ / IF / SF ...
+    try:
+        return normalize_stock_code(text)
+    except Exception:
+        return text.upper()
+
 
 def combo_key(code_list):
     """Normalize a code list into an order-independent combination key.
 
-    Uppercases, strips whitespace, drops empties and duplicates, sorts. So
-    ``["SH","SZ"]``, ``["sz","sh"]`` and ``["SH","SH","SZ"]`` all map to
-    ``"SH,SZ"`` and share one big-QMT subscription.
+    Strips whitespace, drops empties and duplicates, sorts. Exchange tokens are
+    uppercased, so ``["SH","SZ"]``, ``["sz","sh"]`` and ``["SH","SH","SZ"]``
+    all map to ``"SH,SZ"`` and share one big-QMT subscription.
+
+    Contract codes keep their case, because big QMT does: ``cu2610.SF`` and
+    ``CU2610.SF`` are not the same subscription there -- only one of them
+    exists -- so collapsing them into one key would hand the wrong string to
+    the exchange (#95).
     """
-    normalized = {str(code).strip().upper() for code in (code_list or []) if str(code or "").strip()}
-    return ",".join(sorted(normalized))
+    normalized = {normalize_subscription_code(code) for code in (code_list or [])
+                  if str(code or "").strip()}
+    return ",".join(sorted(normalized - {""}))
 
 
 class QuoteSourceAdapter(object):
@@ -108,7 +143,8 @@ class QuoteSubscriptionManager(object):
         with self._lock:
             combo = self._combos.get(key)
             if combo is None:
-                codes = sorted({str(c).strip().upper() for c in (code_list or []) if str(c or "").strip()})
+                codes = sorted({normalize_subscription_code(c) for c in (code_list or [])
+                                if str(c or "").strip()} - {""})
                 # source.subscribe registers the on_push callback with big QMT; it
                 # does not call back into the manager, so it is safe under the lock.
                 handle = self._source.subscribe(codes, self._make_on_push(key))
