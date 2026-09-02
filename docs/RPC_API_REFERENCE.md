@@ -54,7 +54,7 @@
       "time": 1719...（毫秒时间戳）, "stime": "20240701 15:00:00"
   }}
   ```
-- **实现**：透传 `ContextInfo.get_full_tick(code_list)`，原生返回什么字段就回传什么字段（不做转换）。
+- **实现**：默认透传 `ContextInfo.get_full_tick(code_list)`。部分完整大 QMT 版本会省略显式 `.SHO/.SZO` 合约；仅对这些缺失期权从 `get_market_data_ex(period="tick", count=1)` 取最新行补齐，股票/ETF 路径不变。
 - **注意**：整市场快照（`["SH"]`）数据量大，建议配合客户端 `full_tick_cache` 降载。
 
 ### `get_instrument`
@@ -67,7 +67,7 @@
 
 ## 2.5 全推行情订阅（server 推送，对齐 miniqmt `subscribe_whole_quote`）
 
-这三个方法只管理**订阅生命周期与心跳**；行情数据本身走独立的 server→client 推送通道（zmq PUB/SUB 或 redis pub/sub，msgpack 编码、json 兜底），**不经过 RPC 响应**。多 client 订阅同一组合（`frozenset` 规范化）共享同一个大 QMT `ContextInfo.subscribe_whole_quote`，引用计数归零（全部退订或全部心跳超时）才真正退订大 QMT。详见 `docs/SUBSCRIBE_WHOLE_QUOTE_PUSH.md`。
+这三个方法只管理**订阅生命周期与心跳**；行情数据本身走独立的 server→client 推送通道（zmq PUB/SUB 或 redis pub/sub，msgpack 编码、json 兜底），**不经过 RPC 响应**。多 client 订阅同一组合（`frozenset` 规范化）共享一个服务端订阅组：普通代码使用 `ContextInfo.subscribe_whole_quote`，显式 `.SHO/.SZO` 合约逐只使用 `ContextInfo.subscribe_quote(..., result_type="list")`。引用计数归零（全部退订或全部心跳超时）才退订组内全部大 QMT 句柄。详见 `docs/SUBSCRIBE_WHOLE_QUOTE_PUSH.md`。
 
 ### `subscribe_whole_quote`
 - **参数**：`client_id`（str，必填，client 进程级稳定 id）、`sub_id`（str，必填，client 侧订阅号）、`codes`（list[str]，必填）：市场代码（`["SH","SZ"]`）或品种代码列表。
