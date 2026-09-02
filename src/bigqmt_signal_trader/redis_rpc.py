@@ -187,6 +187,8 @@ METHOD_ALIASES = {
 BUY_ORDER_TYPES = {"23", "STOCK_BUY", "BUY", "B"}
 SELL_ORDER_TYPES = {"24", "STOCK_SELL", "SELL", "S"}
 CANCELABLE_ORDER_STATUSES = {"50", "55"}
+CANCELED_ORDER_STATUSES = {"53", "54"}
+TERMINAL_NON_CANCEL_ORDER_STATUSES = {"56", "57"}
 SAFE_B64_PREFIX = "b64s:"
 SAFE_B64_DIGIT_ENCODE = str.maketrans("0123456789", "!#$%&()*~?")
 SAFE_B64_DIGIT_DECODE = str.maketrans("!#$%&()*~?", "0123456789")
@@ -433,6 +435,29 @@ class OrderSettlement(object):
         self.deadline = deadline
         self.attempts = 0
         self.server_error = ""
+        self.request = None
+        self.response = None
+
+
+class CancelSettlement(object):
+    """One falsey native cancel result awaiting the order's actual status.
+
+    Full QMT's injected ``cancel`` return is not reliable across terminal
+    builds.  On Guojin 2.1.19.0 it returned falsey even though the broker
+    acknowledged the request and the order moved to status 54 within 67 ms
+    (issue #148).  Like order-id settlement, status readback must stay on the
+    adjust thread because get_trade_detail_data is empty on worker threads.
+    """
+
+    __slots__ = ("order_ref", "account_id", "result", "deadline", "attempts",
+                 "request", "response")
+
+    def __init__(self, order_ref, account_id, result, deadline):
+        self.order_ref = order_ref
+        self.account_id = account_id
+        self.result = result
+        self.deadline = deadline
+        self.attempts = 0
         self.request = None
         self.response = None
 
@@ -1593,12 +1618,94 @@ class BigQmtRpcHandlers:
     def _handle_cancel_order(self, params):
         if self.order_gateway is None:
             raise RuntimeError("order_gateway is not configured")
+        account_id = self._request_account_id(params)
         order_sys_id = str(params.get("order_sys_id") or params.get("order_sysid") or params.get("order_id") or "")
         if not order_sys_id:
             raise ValueError("order_sys_id or order_id is required")
-        return self.order_gateway.cancel(
-            OrderRef(order_sys_id=order_sys_id, user_order_id=str(params.get("user_order_id") or ""))
+        order_ref = OrderRef(
+            order_sys_id=order_sys_id,
+            user_order_id=str(params.get("user_order_id") or ""),
         )
+        result = self.order_gateway.cancel(order_ref)
+
+        # A truthy native return keeps the existing fast path.  A falsey one is
+        # ambiguous on full QMT: issue #148 captured cancel() returning falsey
+        # while the broker accepted the request and status became 54.  Park only
+        # that ambiguous response and let the main-thread order snapshot settle
+        # it; never turn a genuinely filled/rejected/still-active order into a
+        # successful cancel.
+        if getattr(result, "success", None) is False:
+            settlement = CancelSettlement(
+                order_ref,
+                account_id,
+                result,
+                _monotonic() + self.order_settle_timeout_seconds,
+            )
+            if self.settle_orders_inline:
+                try:
+                    import time as _time
+                    _time.sleep(self.order_settle_timeout_seconds)
+                    self._apply_cancel_lookup(settlement, final=True)
+                except Exception:
+                    pass
+            else:
+                self._pending_settlement = settlement
+        return result
+
+    def _apply_cancel_lookup(self, settlement, final=False):
+        """Resolve an ambiguous native cancel return from the order snapshot."""
+        settlement.attempts += 1
+        order_sys_id = str(settlement.order_ref.order_sys_id or "")
+        try:
+            strict_query = getattr(self.order_gateway, "query_orders_strict", None)
+            if callable(strict_query):
+                orders = strict_query(settlement.account_id, "") or []
+            else:
+                orders = self.order_gateway.query_orders(settlement.account_id, "") or []
+        except Exception as exc:
+            if not final:
+                return False
+            settlement.result.success = False
+            settlement.result.message = (
+                "cancel status lookup failed after %d attempt(s): %s: %s"
+                % (settlement.attempts, exc.__class__.__name__, exc)
+            )
+            return True
+
+        matches = [
+            order for order in orders
+            if str(getattr(order, "order_sys_id", "") or "") == order_sys_id
+        ]
+        if not matches:
+            if not final:
+                return False
+            settlement.result.success = False
+            settlement.result.message = (
+                "cancel was not confirmed: order %s was not found after %d lookup(s)"
+                % (order_sys_id, settlement.attempts)
+            )
+            return True
+
+        status = str(getattr(matches[0], "status", "") or "")
+        if status in CANCELED_ORDER_STATUSES:
+            settlement.result.success = True
+            settlement.result.message = ""
+            return True
+        if status in TERMINAL_NON_CANCEL_ORDER_STATUSES:
+            settlement.result.success = False
+            settlement.result.message = (
+                "cancel was not confirmed: order %s reached status %s"
+                % (order_sys_id, status)
+            )
+            return True
+        if not final:
+            return False
+        settlement.result.success = False
+        settlement.result.message = (
+            "cancel was not confirmed after %d lookup(s): order %s is still status %s"
+            % (settlement.attempts, order_sys_id, status or "unknown")
+        )
+        return True
 
 
 def _bool_value(value, default=False):
@@ -1778,9 +1885,9 @@ class RedisPubSubRpcService:
         self._deferred_count = 0
         self.print_prefix = print_prefix
         self.pending = queue.Queue(maxsize=int(max_queue_size))
-        # Orders whose reply is waiting on QMT assigning an order id. Unbounded
-        # on purpose: every entry is an order that already reached the broker,
-        # so dropping one would strand a live order with no reply.
+        # Submit/cancel replies waiting on a main-thread order snapshot.
+        # Unbounded on purpose: every entry represents a live broker operation,
+        # so dropping one would strand it with no reply.
         self._pending_settlements = queue.Queue()
         self._running = threading.Event()
         self._thread = None
@@ -1972,7 +2079,7 @@ class RedisPubSubRpcService:
         return payload
 
     def settle_pending_orders(self, max_items=100):
-        """Retry parked order lookups. MUST be called from the adjust thread.
+        """Retry parked submit/cancel lookups on the adjust thread.
 
         A queue rather than a list because rpc_listener_methods is configurable:
         if submit_order is ever put in it, the producer becomes the listener
@@ -1993,7 +2100,10 @@ class RedisPubSubRpcService:
                 break
             expired = _monotonic() >= settlement.deadline
             try:
-                done = self.handlers._apply_order_lookup(settlement, final=expired)
+                if isinstance(settlement, CancelSettlement):
+                    done = self.handlers._apply_cancel_lookup(settlement, final=expired)
+                else:
+                    done = self.handlers._apply_order_lookup(settlement, final=expired)
             except Exception:
                 done = True  # never strand a submitted order in the queue
             if not done:
@@ -2002,7 +2112,7 @@ class RedisPubSubRpcService:
             response = settlement.response
             response["data"] = to_jsonable(settlement.result)
             response["ok"] = True
-            if settlement.server_error:
+            if getattr(settlement, "server_error", ""):
                 response["server_error"] = settlement.server_error
             response["handled_at"] = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             try:
@@ -2094,9 +2204,10 @@ class RedisPubSubRpcService:
             server_error = getattr(self.handlers, "_last_server_error", None)
             if server_error:
                 response["server_error"] = str(server_error)
-            # passorder already ran, but QMT assigns the order id asynchronously.
-            # Park the reply instead of sleeping on this thread; a later adjust
-            # tick settles and publishes it (issue #44).
+            # passorder may still be awaiting its asynchronously assigned id;
+            # a falsey native cancel may still be awaiting a reliable terminal
+            # status (#148). Park either reply instead of sleeping on this
+            # thread; a later adjust tick settles and publishes it (#44).
             take = getattr(self.handlers, "take_pending_settlement", None)
             settlement = take() if callable(take) else None
             if settlement is not None:
