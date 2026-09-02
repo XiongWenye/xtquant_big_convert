@@ -3,9 +3,24 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
 
-## [未发布]
+## [0.3.14] - 2026-09-02
 
 ### 修复
+
+- **单文件构建丢掉了 zmq 绑定地址和 transport**（issue #153，@simonfantasy）：向导里填了 QMT 机器的局域网地址，生成的 `local_config.py` 里是对的 `"zmq": {"bind_address": "tcp://0.0.0.0:15618"}`，但跑起来的 FLAT 构建打印 `zmq started bound=tcp://127.0.0.1:15618`，跨机连不上。
+
+  报告人的判断是对的：**单文件部署从来不读 `local_config.py`** —— `_load_local_config()` 是拿构建文件顶部那个内嵌配置块**合成**出这个模块的。所以内嵌块**就是**配置，而生成它的 `render_single_file_config_block()` 少了两个 key：
+
+  ```
+  带 zmq 块 -> tcp://0.0.0.0:15618
+  无 zmq 块 -> tcp://127.0.0.1:15618      <- 报告里那行
+  ```
+
+  **还牵出一个没人报的**：内嵌块连 `transport` 都没有。no-redis 的 FLAT 构建之后会强制 zmq 所以躲过去了，但 base64 的 `single_file` 构建不强制 —— 在那里选 `transport=zmq`，生成出来的服务端跑 **redis** 而客户端说 zmq，正好复现成「客户端 transport 和服务端不匹配」的 ping 超时。
+
+  两个 key 都补上了。真正拦住这一类的是那条结构性测试：`render_server_config` 输出的每个顶层 key 都必须出现在单文件块里 —— 对单文件部署来说，配置**没有第二个来源**。
+
+  **注意**：修的是生成器，不是已生成的文件。升级后需要**重新跑一次 `bigqmt-init`** 生成单文件。
 
 - **qmt-trader CLI 的 `--dry-run` 会真下单**：`_ok()` 只打印不退出，dry-run 分支打印完预演后穿透到真实下单代码——`buy`/`sell`/`cancel` 三个命令全中招。SKILL.md 承诺「只打印不下单」，行为正好相反。2026-09-02 实盘事故：`buy 601398.SH 100 --dry-run` 真发出了一笔委托（仅因账户可用资金不足被打成废单，未造成成交）。补上两个 `return`，并加回归测试（修复前 4 个用例中 3 个失败）。
 
