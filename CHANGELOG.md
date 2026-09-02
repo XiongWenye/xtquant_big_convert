@@ -3,7 +3,7 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
 
-## [Unreleased]
+## [0.3.13] - 2026-09-02
 
 ### 修复
 
@@ -963,7 +963,7 @@ xt_trader.sync_deployment()   # 自动拷，不碰 config 文件
 
 ---
 
-## [Unreleased]
+## [0.2.7] - 2026-08-24
 
 ### 新增
 
