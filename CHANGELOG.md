@@ -3,6 +3,19 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
 
+## [未发布]
+
+### 修复
+
+- **qmt-trader CLI 一批问题**（全部带回归测试，修复前 8 个用例失败）：
+
+  - **`cancel` 把撤单结果报反了**：网关遵循 MiniQMT 契约返回 `0`=成功 / `-1`=失败（issue #113），而 `bool(0)` 是 `False` —— 撤单**成功**被报成 `success: false`，**失败**反而报成 `true`。现在 `rc != 0` 直接以 `CANCEL_REJECTED` 报错退出；成功后回读委托行带回最终状态（写完必须回读）。
+  - **全局 flag 只能放在子命令前**：`qmt.py account --table` 报 `unrecognized arguments`，而这才是最自然的写法。现在 `--table`/`--account` 放在子命令后同样生效。
+  - **editable 安装下 `import xtquant` 被 site-packages 的真包遮蔽**：`_ensure_src_on_path` 只在 src 不在 sys.path 时才插入——editable 安装已把 src 放进去（但在 site-packages **之后**），于是真 xtquant 的 `__init__` 打印升级广告，污染 CLI stdout 上的 JSON 输出（`qmt.py ... | jq` 直接坏）。现在确保 src 永远挪到最前。
+  - **`quote-subscribe` 首帧竞态**：首帧快照可能在 `subscribe_whole_quote` 返回前就推给回调，此时 `sub_id` 尚未绑定，回调里 `unsubscribe_quote(sub_id)` 抛 `NameError`。加 None 守卫。
+  - **`kline` 统计的 high/low 名不副实**：用的是收盘价的最大/最小值，不是 K 线的最高/最低价。改用 high/low 字段（无字段时回落收盘价）。
+
+
 ## [0.3.14] - 2026-09-02
 
 ### 修复

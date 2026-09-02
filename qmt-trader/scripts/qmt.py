@@ -52,8 +52,15 @@ def _ensure_src_on_path() -> None:
         candidate = ancestor / "src"
         if (candidate / "bigqmt_signal_trader" / "__init__.py").exists():
             src_str = str(candidate)
-            if src_str not in sys.path:
-                sys.path.insert(0, src_str)
+            # 不能只查 in sys.path：editable 安装会把 src 放在 site-packages
+            # 之后，site-packages 里的真 xtquant 就会遮蔽本仓库的 shim
+            # （实测：import xtquant 打印升级广告、污染 stdout 的 JSON 输出）。
+            # 必须确保 src 在最前——已存在就挪到最前。
+            if src_str in sys.path:
+                if sys.path.index(src_str) == 0:
+                    return
+                sys.path.remove(src_str)
+            sys.path.insert(0, src_str)
             return
     # 没找到仓库 src，假设用户已 pip install
     return
@@ -438,8 +445,11 @@ def cmd_kline(args):
         stats["count"] = len(closes)
         stats["first_close"] = closes[0]
         stats["last_close"] = closes[-1]
-        stats["high"] = max(closes)
-        stats["low"] = min(closes)
+        # high/low 要用 K 线的 high/low 字段，closes 的极值不是最高价/最低价
+        highs = [r.get("high") for r in records if r.get("high") is not None]
+        lows = [r.get("low") for r in records if r.get("low") is not None]
+        stats["high"] = max(highs) if highs else max(closes)
+        stats["low"] = min(lows) if lows else min(closes)
         stats["change_pct"] = round((closes[-1] - closes[0]) / closes[0] * 100, 2) if closes[0] else None
         # 简单均线
         if len(closes) >= 5:
@@ -689,10 +699,33 @@ def cmd_cancel(args):
         _ok({"dry_run": True, "order_sysid": args.order_id, "market": args.market or ""})
         return
     try:
-        success = tr.cancel_order_stock_sysid(acc, args.market or "", args.order_id)
+        rc = tr.cancel_order_stock_sysid(acc, args.market or "", args.order_id)
     except Exception as e:
         _err("撤单失败", detail=str(e), code="CANCEL_FAIL")
-    _ok({"order_sysid": args.order_id, "market": args.market or "", "success": bool(success)})
+    # MiniQMT 契约：0=成功，-1=失败（issue #113）。bool(rc) 会把含义颠倒过来。
+    if rc != 0:
+        _err(
+            "撤单被拒绝（返回 %s）。委托可能已成/已撤/不存在——先用 orders 确认实际状态，"
+            "注意 issue #151：撤不存在的委托也可能返回成功" % rc,
+            code="CANCEL_REJECTED",
+        )
+    # 写完必须回读：撤单返回值只代表「请求发出去了」，不代表「撤成了」
+    time.sleep(0.5)
+    confirmed = None
+    try:
+        orders = tr.query_stock_orders(acc, strategy_name="")
+        for o in orders or []:
+            if str(getattr(o, "order_sysid", "")) == str(args.order_id):
+                confirmed = _order_to_dict(o)
+                break
+    except Exception:
+        pass
+    _ok({
+        "order_sysid": args.order_id,
+        "market": args.market or "",
+        "success": True,
+        "confirmed_order": confirmed,
+    })
 
 
 def cmd_snapshot(args):
@@ -768,6 +801,7 @@ def cmd_quote_subscribe(args):
     """订阅全推行情（打印前 N 条后退出）。"""
     _, xtdata, _ = _init()
     received = []
+    sub_id = None  # 首帧快照可能在 subscribe 返回前就推给回调，此时 sub_id 还没绑上
 
     def on_quote(data):
         for code, tick in (data or {}).items():
@@ -779,7 +813,7 @@ def cmd_quote_subscribe(args):
             }
             received.append(entry)
             print(json.dumps(entry, ensure_ascii=False))
-        if len(received) >= args.max:
+        if len(received) >= args.max and sub_id is not None:
             xtdata.unsubscribe_quote(sub_id)
             # 给一点时间让退订生效
             time.sleep(0.5)
@@ -1037,6 +1071,15 @@ def build_parser():
     sp.add_argument("--max", type=int, default=10, help="收到 N 条后退出")
     sp.add_argument("--timeout", type=int, default=30, help="超时秒数")
     sp.set_defaults(func=cmd_quote_subscribe)
+
+    # argparse 只认子命令之前的全局 flag，但 `qmt.py account --table` 才是
+    # 自然写法。给每个子命令也挂上这两个 flag：default=SUPPRESS 保证未提供时
+    # 不覆盖顶层解析到的值。
+    for subp in sub.choices.values():
+        subp.add_argument("--account", default=argparse.SUPPRESS,
+                          help="指定账号 ID（覆盖配置）")
+        subp.add_argument("--table", action="store_true", default=argparse.SUPPRESS,
+                          help="输出表格而非 JSON")
 
     return p
 
