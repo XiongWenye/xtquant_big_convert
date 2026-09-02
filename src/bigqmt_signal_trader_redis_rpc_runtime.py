@@ -91,6 +91,18 @@ ACCOUNT_ID = ""
 # 账号类型：STOCK(股票) / CREDIT(信用/两融) / FUTURE(期货) / OPTION(期权)
 # 对应 xtconstant 枚举：SECURITY_ACCOUNT=2 / CREDIT_ACCOUNT=3 / FUTURE_ACCOUNT=1
 ACCOUNT_TYPE = "STOCK"
+# 这台机器上到底有没有 redis 可用。默认 True 只是为了不改变既有部署的行为；
+# 它并不代表「配了 redis」—— 下面 REDIS_HOST/PORT 有默认值，所以光看配置永远
+# 分辨不出「我配了 redis」和「我什么都没写」（issue #147）。
+#
+# 设成 False 时 configure_runtime 干脆不发 redis 块，于是 config["redis"] 为空，
+# 五个使用方（委托身份库、异步下载任务、全推快照缓存、exec 事件、身份回填）
+# 各自的 `if not redis_config: return None` 自然生效，一次都不会去连。
+#
+# 用在 redis 根本不可用的环境：券商 QMT 的 import 白名单不含 redis（issue #145），
+# 或者纯 zmq 部署本来就没打算装 redis。transport=redis 时这个开关被忽略 ——
+# 那种部署没有 redis 就没有 RPC。
+REDIS_ENABLED = True
 REDIS_HOST = "127.0.0.1"
 REDIS_PORT = 6379
 REDIS_DB = 5
@@ -224,6 +236,7 @@ def _report_account_type():
 
 _report_deployment()
 _report_account_type()
+REDIS_ENABLED = bool(BIGQMT_REDIS_CONFIG.get("redis_enabled", REDIS_ENABLED))
 REDIS_HOST = BIGQMT_REDIS_CONFIG.get("host", REDIS_HOST)
 REDIS_PORT = int(BIGQMT_REDIS_CONFIG.get("port", REDIS_PORT))
 REDIS_DB = int(BIGQMT_REDIS_CONFIG.get("db", REDIS_DB))
@@ -268,6 +281,30 @@ EXEC_EVENTS_DEBUG_RAW_FIELDS = bool(
 )
 
 
+def _redis_block():
+    """The redis settings, or {} when this deployment has no redis (#147).
+
+    An empty dict is the whole point: every consumer already guards with
+    `if not redis_config: return None`, and those guards were dead because
+    this block was emitted unconditionally with module defaults.
+
+    transport=redis overrides the switch -- that deployment cannot run without
+    redis, so honouring redis_enabled=False there would break the RPC bridge
+    itself rather than the optional extras.
+    """
+    if not REDIS_ENABLED and RPC_TRANSPORT not in ("redis", "", "default"):
+        return {}
+    return {
+        "host": REDIS_HOST,
+        "port": REDIS_PORT,
+        "db": REDIS_DB,
+        "username": REDIS_USERNAME,
+        "password": REDIS_PASSWORD,
+        "position_key_template": "bigqmt:positions:{account_id}",
+        "position_event_stream_template": "bigqmt:position_events:{account_id}",
+    }
+
+
 def _apply_config(account_id):
     account_id = str(account_id or "")
     if account_id:
@@ -280,15 +317,7 @@ def _apply_config(account_id):
         enable_rpc=True,
         schedule_adjust=SCHEDULE_ADJUST_ENABLED,
         schedule_adjust_interval=SCHEDULE_ADJUST_INTERVAL,
-        redis={
-            "host": REDIS_HOST,
-            "port": REDIS_PORT,
-            "db": REDIS_DB,
-            "username": REDIS_USERNAME,
-            "password": REDIS_PASSWORD,
-            "position_key_template": "bigqmt:positions:{account_id}",
-            "position_event_stream_template": "bigqmt:position_events:{account_id}",
-        },
+        redis=_redis_block(),
         rpc={
             "enabled": True,
             "account_id": account_id,
@@ -337,8 +366,9 @@ def configure_runtime_account(account_id):
 
 
 def configure_runtime_redis(redis_config):
-    global REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_USERNAME, REDIS_PASSWORD, RPC_ALLOW_ORDER_METHODS, RPC_PROCESS_IN_LISTENER, RPC_BACKGROUND_THREADS, RPC_LISTENER_METHODS, SCHEDULE_ADJUST_ENABLED, SCHEDULE_ADJUST_INTERVAL, FULL_TICK_CACHE_ENABLED, FULL_TICK_DEMAND_TTL_SECONDS, FULL_TICK_CACHE_TTL_SECONDS, FULL_TICK_REFRESH_INTERVAL_SECONDS, FULL_TICK_MARKET_REFRESH_INTERVAL_SECONDS, FULL_TICK_REFRESH_MAX_WALL_SECONDS, FULL_TICK_MAX_REQUESTS, RPC_TRANSPORT, RPC_ZMQ_CONFIG, RPC_MYSQL_CONFIG, DOWNLOAD_JOBS_ENABLED, DOWNLOAD_JOB_CHUNK_SIZE, DOWNLOAD_JOB_MAX_WALL_SECONDS, DOWNLOAD_JOB_TTL_SECONDS, EXEC_EVENTS_ENABLED, EXEC_EVENTS_DEBUG_RAW_FIELDS
+    global REDIS_ENABLED, REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_USERNAME, REDIS_PASSWORD, RPC_ALLOW_ORDER_METHODS, RPC_PROCESS_IN_LISTENER, RPC_BACKGROUND_THREADS, RPC_LISTENER_METHODS, SCHEDULE_ADJUST_ENABLED, SCHEDULE_ADJUST_INTERVAL, FULL_TICK_CACHE_ENABLED, FULL_TICK_DEMAND_TTL_SECONDS, FULL_TICK_CACHE_TTL_SECONDS, FULL_TICK_REFRESH_INTERVAL_SECONDS, FULL_TICK_MARKET_REFRESH_INTERVAL_SECONDS, FULL_TICK_REFRESH_MAX_WALL_SECONDS, FULL_TICK_MAX_REQUESTS, RPC_TRANSPORT, RPC_ZMQ_CONFIG, RPC_MYSQL_CONFIG, DOWNLOAD_JOBS_ENABLED, DOWNLOAD_JOB_CHUNK_SIZE, DOWNLOAD_JOB_MAX_WALL_SECONDS, DOWNLOAD_JOB_TTL_SECONDS, EXEC_EVENTS_ENABLED, EXEC_EVENTS_DEBUG_RAW_FIELDS
     redis_config = dict(redis_config or {})
+    REDIS_ENABLED = bool(redis_config.get("redis_enabled", REDIS_ENABLED))
     REDIS_HOST = redis_config.get("host", REDIS_HOST)
     REDIS_PORT = int(redis_config.get("port", REDIS_PORT))
     REDIS_DB = int(redis_config.get("db", REDIS_DB))
