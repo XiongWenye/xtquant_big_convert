@@ -25,6 +25,8 @@
 
 ### 修复
 
+- **无 redis 部署里 `strategy_name` 查询永远回填不上**（issue #156 / #133）：QMT 的委托/成交行根本不携带策略名（终端按它过滤、但不报告），桥靠提交时记的 redis 身份库在查询时回填 —— 但 zmq 单文件等无 redis 部署没有身份库，`strategy_name` 永远读 `''`。现在服务端同时维护一份**进程内身份日志**（提交时记 `remark -> strategy_name`，5000 条 FIFO + 24h TTL，与 redis 店同规则）：没 redis 的部署里，凡本进程提交过的委托，查询都能回填策略名。redis 仍是主店（跨重启、跨进程）。回归测试 6 个（修复前 3 个失败）。
+
 - **zmq 传输 + redis 可达的部署里，委托/成交回调永远收不到**（issue #144，@sumo225270）：服务端发布执行事件是「**redis 优先**」——只要能建出 redis 客户端就发 redis 通道（流带短回放），连挂多次才降级到 zmq 推送通道（#145）。而客户端 `_event_loop` 是**按 transport 选的**——zmq 传输只听 zmq 推送通道。于是这类部署里每个事件都发在 redis 上，客户端却在另一个通道上听：`on_stock_order` / `on_stock_trade` 静默全丢。
 
   实盘复现（2026-09-02，国金 2.1.19.0，zmq 传输 + redis 可达）：当天全部委托事件都躺在 redis 流 `bigqmt:order_events:<账号>` 里（14:05 活单 50 → 撤单 54、16:40 废单 57 一条不缺），而 zmq 传输的 XtQuantTrader 回调一个都没收到。
