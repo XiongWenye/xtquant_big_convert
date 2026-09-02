@@ -620,7 +620,7 @@ def _place_order(args, action):
         price = args.price
     strategy = args.strategy or "llm_agent"
     remark = args.remark or "llm_%s_%d" % (action.lower(), int(time.time()))
-    # 干跑模式
+    # 干跑模式：_ok 只打印不退出，必须 return，否则会穿透到真实下单
     if args.dry_run:
         _ok({
             "dry_run": True,
@@ -632,6 +632,7 @@ def _place_order(args, action):
             "strategy_name": strategy,
             "order_remark": remark,
         })
+        return
     # 真实下单
     try:
         order_id = tr.order_stock(
@@ -686,6 +687,7 @@ def cmd_cancel(args):
     acc = _acc_or(args.account)
     if args.dry_run:
         _ok({"dry_run": True, "order_sysid": args.order_id, "market": args.market or ""})
+        return
     try:
         success = tr.cancel_order_stock_sysid(acc, args.market or "", args.order_id)
     except Exception as e:

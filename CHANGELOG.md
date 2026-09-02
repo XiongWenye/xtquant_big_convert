@@ -3,6 +3,13 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
 
+## [未发布]
+
+### 修复
+
+- **qmt-trader CLI 的 `--dry-run` 会真下单**：`_ok()` 只打印不退出，dry-run 分支打印完预演后穿透到真实下单代码——`buy`/`sell`/`cancel` 三个命令全中招。SKILL.md 承诺「只打印不下单」，行为正好相反。2026-09-02 实盘事故：`buy 601398.SH 100 --dry-run` 真发出了一笔委托（仅因账户可用资金不足被打成废单，未造成成交）。补上两个 `return`，并加回归测试（修复前 4 个用例中 3 个失败）。
+
+
 ## [0.3.13] - 2026-09-02
 
 ### 修复
