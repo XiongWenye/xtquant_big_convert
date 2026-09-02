@@ -2,6 +2,42 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [0.3.12] - 2026-09-02
+
+### 新增
+
+- **`redis_enabled` 开关：可以声明「这台机器没有 redis」**（issue #147）。以前声明不了 —— `configure_runtime` 无条件下发 redis 块，而 `REDIS_HOST` / `REDIS_PORT` 有默认值（`127.0.0.1:6379`），所以「配了 redis」和「什么都没写」从配置里分辨不出来。五个使用方各自的 `if not redis_config: return None` 守卫因此全是死代码。
+
+  ```python
+  BIGQMT_REDIS_CONFIG = {
+      "redis_enabled": False,     # 仅对非 redis 传输生效
+      "transport": "zmq",
+  }
+  ```
+
+  设 False 后整个 redis 块不再下发，委托身份库、异步下载任务、全推快照缓存、exec 事件推送**一次都不会去连**。`transport=redis` 时开关被忽略 —— 那种部署没 redis 就没有桥。
+
+  代价（例子配置里写明了，因为否则是静默的）：查询里的 `strategy_name` 回填失效（#133）；异步下载任务和全推快照缓存不可用 —— 后两个在大 QMT 上本来就默认关闭。**委托/成交回调不受影响**，走 zmq 推送通道。
+
+  `bigqmt_no_redis/DRYRUN_no_redis.py` 和单文件构建器现在默认带上这一项 —— 最确定会撞上这个问题的构建，恰恰是最没法表达它的。
+
+### 修复
+
+- **连不上的 redis 会吞掉委托/成交回调**（issue #145，@heimo88）：`_exec_event_sink` 只要 redis「available」就优先，而 available 只意味着**配了**。redis-py 是惰性连接的，配了但连不上时 client 建得出来、每次 publish 才超时 —— **回调全丢，而旁边工作正常的 zmq 推送通道一次都没被用上**，每个事件还刷一整段 traceback。
+
+  现在：publish 失败**立刻回落到推送通道**（回调照样送达，不再丢）；连续 3 次失败降级 redis，且**只在有地方可降时才降**（降到 None 等于把吵闹的失败变成静默的失败）；traceback 限流 —— 前 3 次全量（issue #76 挣来的），之后每 50 次一行摘要。
+
+- **两个桥接器抢同一个日志文件**（issue #144，@sumo225270）：同机同账号跑实盘桥 + 模拟桥，两个客户端都回落到 `~/.cache/bigqmt/logs/bigqmt.log`。两个进程两个句柄，Windows 永远拒绝轮转重命名，而轮转不成功意味着 `backupCount` 清理也永不执行 —— 日志无限增长。
+
+  0.3.11 的 #139 修的是**同一进程内** handler 累积；这条是**跨进程**，进程内怎么管都够不着。日志文件名现在带进程标识：有 `BIGQMT_ACCOUNT_ID` 就用账号（跨重启稳定，轮转能接上），否则用 PID，`BIGQMT_LOG_NAME` 可以钉死。轮转失败也不再抛 —— 丢一次轮转比每写一条日志刷一段 traceback 好。
+
+  实盘：部署后日志目录里是 `bigqmt-pid51044.log` / `bigqmt-pid76544.log` / `bigqmt-pid88484.log`，每条日志只出现 1 次；`bigqmt.log.2026-09-01` 出现了 —— **这个部署有史以来第一次轮转成功**。面板轮转报错从部署前 7 次变为部署后 0 次。
+
+### 已知限制
+
+- **#145 的失败降级路径未经实盘验证**：本机 redis 是通的，走不到那条分支。只有单元测试覆盖（16 个用例）。要实盘验证得停掉 redis 再下单，两件都没做。
+- **`redis_enabled=False` 的效果未经实盘验证**：本机有 redis，不需要关。默认值（True）的**无回归**已验证 —— redis 块照常下发、exec 事件仍选 redis、委托身份库端到端跑通。
+
 ## [0.3.11] - 2026-09-01
 
 ### 修复
