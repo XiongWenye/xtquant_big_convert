@@ -2,6 +2,31 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+
+## [Unreleased]
+
+### 修复
+
+- **大 QMT 期权 tick 快照与实时订阅兼容**：部分完整大 QMT 版本对显式
+  `.SHO/.SZO` 合约的 `ContextInfo.get_full_tick` 返回空，且
+  `subscribe_whole_quote` 不推送该合约。缺失的期权快照现在从
+  `get_market_data_ex(period="tick", count=1)` 补齐；显式期权订阅改用
+  `ContextInfo.subscribe_quote(..., result_type="list")`，并将列数组规范化为
+  最新一笔五档 tick。股票、ETF 和市场代码仍走原有共享全推路径；混合组合会
+  统一管理多个底层句柄，失败时回滚、退订时完整清理。
+
+  2026-09-02 盘中在完整大 QMT 2.1.19.0 实测：`10010974.SHO` 的
+  `get_full_tick` 从空结果恢复为实时五档；单期权订阅连续收到 500ms 推送；
+  `510050.SH + 10010974.SHO` 混合组合同时收到 ETF 与期权；510050 202609
+  期权链 IV/Greeks 仍为 28/28 有效。
+
+  另在本仓库的国金 2.1.19.0 终端上**独立复现并验证**：修复前
+  `get_full_tick(["10010974.SHO"])` 返回 `{}`，且混合请求
+  `["510050.SH", "10010974.SHO"]` **只回 510050 —— 期权静默消失**，调用方拿到
+  一个看起来正常的结果却少一个代码；修复后两者都返回 lastPrice / volume /
+  五档。订阅初始快照同样：修复前单期权那一帧一个代码都没有，修复后期权在。
+  连续推送未在本终端验证（测时为午休时段）。
+
 ## [0.3.12] - 2026-09-02
 
 ### 新增

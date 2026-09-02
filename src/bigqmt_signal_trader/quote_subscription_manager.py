@@ -1,9 +1,12 @@
-"""Reference-counted whole-quote subscription manager (server side).
+"""Reference-counted quote subscription manager (server side).
 
-One big-QMT ``ContextInfo.subscribe_whole_quote`` subscription is shared by every
-client that asked for the same (normalized) code combination. The big-QMT
-subscription is only created for the first client of a combination and only torn
-down after the last client either unsubscribes or goes silent (keepalive timeout).
+One big-QMT subscription group is shared by every client that asked for the same
+(normalized) code combination. Normal instruments use
+``ContextInfo.subscribe_whole_quote``. Explicit .SHO/.SZO option contracts use
+``ContextInfo.subscribe_quote(result_type="list")`` because some full Big-QMT
+versions do not push those contracts through the whole-quote API. The group is
+only created for the first client and only torn down after the last client either
+unsubscribes or goes silent (keepalive timeout).
 
 The manager talks to big QMT exclusively through a :class:`QuoteSourceAdapter`;
 it never touches ``ContextInfo`` directly so the real-environment wiring (method
@@ -46,6 +49,7 @@ def normalize_subscription_code(code):
         return normalize_stock_code(text)
     except Exception:
         return text.upper()
+from .quote_utils import is_option_code, latest_quote_batch
 
 
 def combo_key(code_list):
@@ -80,26 +84,73 @@ class QuoteSourceAdapter(object):
 class ContextInfoQuoteSource(QuoteSourceAdapter):
     """Real big-QMT source backed by the strategy's ``ContextInfo``.
 
-    Verified against the real environment: ``ContextInfo.subscribe_whole_quote(
-    code_list, callback)`` returns an int subscription id (``< 0`` on failure) and
-    pushes INCREMENTAL ``{code: tick}`` batches on a dedicated quote thread;
-    ``ContextInfo.unsubscribe_quote(sub_id)`` cancels it.
+    Verified against the real environment: ``ContextInfo.subscribe_whole_quote``
+    returns an int subscription id and pushes ``{code: tick}`` batches. Explicit
+    option contracts are subscribed one-by-one with ``subscribe_quote`` and the
+    safe ``result_type='list'`` wrapper; its column arrays are collapsed to the
+    newest tick before publishing. ``unsubscribe_quote`` cancels either handle.
     """
 
     def __init__(self, context_info):
         self._context = context_info
 
     def subscribe(self, codes, on_push):
-        sub_id = self._context.subscribe_whole_quote(list(codes), callback=on_push)
-        if sub_id is None or int(sub_id) < 0:
-            raise RuntimeError("ContextInfo.subscribe_whole_quote failed for codes=%s" % (list(codes),))
-        return int(sub_id)
+        codes = list(codes)
+        option_codes = [code for code in codes if is_option_code(code)]
+        whole_codes = [code for code in codes if not is_option_code(code)]
+        handles = []
+
+        def checked_handle(sub_id, method, method_codes):
+            try:
+                value = int(sub_id)
+            except (TypeError, ValueError):
+                value = -1
+            if value <= 0:
+                raise RuntimeError(
+                    "ContextInfo.%s failed for codes=%s" % (method, list(method_codes))
+                )
+            return value
+
+        try:
+            if whole_codes:
+                sub_id = self._context.subscribe_whole_quote(
+                    whole_codes, callback=on_push
+                )
+                handles.append(checked_handle(
+                    sub_id, "subscribe_whole_quote", whole_codes
+                ))
+
+            def on_option_push(data):
+                batch = latest_quote_batch(data)
+                if batch:
+                    on_push(batch)
+
+            for code in option_codes:
+                sub_id = self._context.subscribe_quote(
+                    code, "tick", "none", "list", on_option_push
+                )
+                handles.append(checked_handle(
+                    sub_id, "subscribe_quote", [code]
+                ))
+        except Exception:
+            for handle in handles:
+                try:
+                    self._context.unsubscribe_quote(handle)
+                except Exception:
+                    pass
+            raise
+
+        if not handles:
+            raise RuntimeError("no quote codes supplied")
+        return handles[0] if len(handles) == 1 else tuple(handles)
 
     def unsubscribe(self, handle):
-        try:
-            self._context.unsubscribe_quote(handle)
-        except Exception:
-            pass
+        handles = handle if isinstance(handle, (list, tuple, set)) else [handle]
+        for sub_id in handles:
+            try:
+                self._context.unsubscribe_quote(sub_id)
+            except Exception:
+                pass
 
 
 class _Combo(object):

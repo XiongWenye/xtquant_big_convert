@@ -223,7 +223,7 @@ xt_trader.ipo_subscribe_all(acc, markets=("SH", "SZ", "BJ"))
 
 ### 全推行情订阅（subscribe_whole_quote 真推送）
 
-`subscribe_whole_quote` 是**服务端真推送**——对齐 MiniQMT 全推行情订阅。服务端引用计数管理 `ContextInfo.subscribe_whole_quote` 回调，通过独立 PUB/SUB 通道向客户端**增量推送**行情（不是一次性快照）：
+`subscribe_whole_quote` 是**服务端真推送**——对齐 MiniQMT 全推行情订阅。服务端引用计数管理大 QMT 行情回调，通过独立 PUB/SUB 通道向客户端**增量推送**行情（不是一次性快照）：
 
 **架构（三通道）**：
 1. **控制面 RPC**——`subscribe_whole_quote` / `unsubscribe_whole_quote` / `quote_keepalive` 方法（复用现有 transport）
@@ -235,6 +235,7 @@ xt_trader.ipo_subscribe_all(acc, markets=("SH", "SZ", "BJ"))
 - **引用计数**：按 `(client_id, sub_id)` 计数，全部退订或 30s keepalive 超时才销毁
 - **客户端心跳**：周期 `quote_keepalive`；检测推送静默（默认 10 轮心跳）自动重放订阅，**服务端重启后自动恢复**
 - **初始快照**：客户端用 `get_full_tick` 预拉快照（big-QMT 回调是增量的）
+- **期权兼容**：显式 `.SHO/.SZO` 合约在部分完整大 QMT 版本中不会从 `subscribe_whole_quote` 推送，因此服务端对这些代码逐合约使用 `ContextInfo.subscribe_quote(..., result_type="list")`；股票、ETF 和市场代码仍走原有全推路径。混合组合对客户端保持一个订阅号。
 
 **用法**：
 
@@ -254,7 +255,7 @@ seq = xtdata.subscribe_whole_quote(["600000.SH", "000001.SZ"], callback=on_quote
 xtdata.unsubscribe_quote(seq)
 ```
 
-**验证**：实盘交易日验证 1/20/50/100 只标的，3s 推送节奏稳定，零丢失零乱序；多客户端共享/退订隔离/同客户端多 sub_id 全过；服务端重启恢复（42s 中断后验证两次）。详见 [docs/SUBSCRIBE_WHOLE_QUOTE_PUSH.md](docs/SUBSCRIBE_WHOLE_QUOTE_PUSH.md) 和 [docs/SUBSCRIBE_WHOLE_QUOTE_LIVE_VERIFICATION.md](docs/SUBSCRIBE_WHOLE_QUOTE_LIVE_VERIFICATION.md)。
+**验证**：实盘交易日验证 1/20/50/100 只标的，3s 推送节奏稳定，零丢失零乱序；多客户端共享/退订隔离/同客户端多 sub_id 全过；服务端重启恢复（42s 中断后验证两次）。另在完整大 QMT 2.1.19.0 盘中验证显式 `.SHO` 快照、500ms 实时推送及 ETF+期权混合组合。详见 [docs/SUBSCRIBE_WHOLE_QUOTE_PUSH.md](docs/SUBSCRIBE_WHOLE_QUOTE_PUSH.md) 和 [docs/SUBSCRIBE_WHOLE_QUOTE_LIVE_VERIFICATION.md](docs/SUBSCRIBE_WHOLE_QUOTE_LIVE_VERIFICATION.md)。
 
 ### 全市场快照的品种过滤（`types`）
 

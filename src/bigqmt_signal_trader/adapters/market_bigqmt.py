@@ -30,6 +30,11 @@ import importlib
 
 from ..code_utils import (
     EXCHANGE_TOKENS, FUTURES_MARKET_CODES, normalize_stock_code)
+from ..logging_setup import get_logger
+from ..quote_utils import find_code_payload, is_option_code, latest_quote_row
+
+
+log = get_logger("market")
 
 
 MARKET_CODES = {"SH", "SZ", "BJ", "HK"}
@@ -565,6 +570,40 @@ class BigQmtMarketDataProvider:
         data = self.context_info.get_full_tick(normalized_codes) or {}
         if not isinstance(data, dict):
             return data or {}
+
+        # Full Big-QMT 2.1.19.0 can return no entry from get_full_tick for an
+        # explicitly requested .SHO/.SZO contract even while its tick stream is
+        # active. The same contract is available through get_market_data_ex
+        # (period="tick"), including the five-level book. Recover only missing
+        # option symbols so the fast native path for stocks/funds is unchanged.
+        answered = {str(key).upper() for key in data}
+        missing_options = [
+            code for code in normalized_codes
+            if is_option_code(code) and str(code).upper() not in answered
+        ]
+        if missing_options:
+            try:
+                fallback = self.get_market_data_ex(
+                    field_list=[],
+                    stock_list=missing_options,
+                    period="tick",
+                    count=1,
+                    dividend_type="none",
+                    fill_data=False,
+                ) or {}
+                for code in missing_options:
+                    row = latest_quote_row(find_code_payload(fallback, code))
+                    if row:
+                        data[code] = row
+            except Exception as exc:
+                # A mixed stock/option request must still return the native
+                # snapshots it already has when an older QMT lacks this API.
+                if not getattr(self, "_option_tick_fallback_warned", False):
+                    self._option_tick_fallback_warned = True
+                    log.warning(
+                        "option tick fallback failed for %s: %s",
+                        missing_options, exc,
+                    )
 
         # Map any answer key back to the caller's spelling when the two differ
         # only by case. Keyed on the upper-cased form deliberately: we now send
