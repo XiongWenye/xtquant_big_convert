@@ -175,5 +175,50 @@ class ExampleConfigTest(unittest.TestCase):
                 self.fail("redis_enabled is live in the example: %r" % line)
 
 
+class NoRedisBuildTest(unittest.TestCase):
+    """The variant whose whole reason to exist is "redis is not importable here".
+
+    It already forced transport=zmq, but not redis_enabled -- so the runtime
+    filled the block in from its defaults and every consumer dialled
+    127.0.0.1:6379 anyway. That is the build most likely to hit #145.
+
+    Two files, because the forcing block is hand-copied into the single-file
+    builder as well. PR #134 was about exactly this class of drift, so pin
+    both rather than trusting them to stay in step.
+    """
+
+    FILES = (
+        os.path.join("bigqmt_no_redis", "DRYRUN_no_redis.py"),
+        os.path.join("tools", "build_no_redis_single_file_flat.py"),
+    )
+
+    def _read(self, relative):
+        import io
+
+        with io.open(os.path.join(ROOT, relative), encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_both_entries_disable_redis(self):
+        for relative in self.FILES:
+            self.assertIn('"redis_enabled"', self._read(relative), relative)
+
+    def test_they_set_it_to_False_not_merely_mention_it(self):
+        for relative in self.FILES:
+            text = self._read(relative)
+            self.assertTrue(
+                'BIGQMT_REDIS_CONFIG["redis_enabled"] = False' in text
+                or '"redis_enabled": False' in text,
+                relative)
+
+    def test_they_still_force_zmq(self):
+        """The new line must not have displaced the existing one."""
+        for relative in self.FILES:
+            self.assertIn('"transport"] = "zmq"', self._read(relative), relative)
+
+    def test_the_entry_says_what_it_costs(self):
+        """A silent loss of strategy_name backfill is how #133 gets reopened."""
+        self.assertIn("strategy_name", self._read(self.FILES[0]))
+
+
 if __name__ == "__main__":
     unittest.main()
