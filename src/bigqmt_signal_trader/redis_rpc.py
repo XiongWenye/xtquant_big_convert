@@ -1553,6 +1553,29 @@ class BigQmtRpcHandlers:
                         settlement.result.order_sys_id = sysid
                     except Exception:
                         pass
+                    return True
+                # The row is there but m_strOrderSysID is not populated yet.
+                # Settling here publishes order_sys_id=None, the client turns
+                # that into -1, and a LIVE order is reported as ORDER_REJECTED
+                # -- a caller who retries on rejection double-orders. Measured
+                # on Guojin 2.1.19.0: the id was present on an immediate manual
+                # readback right after the -1 (issue #152). So keep waiting;
+                # the row already proves the order reached the broker.
+                if not final:
+                    return False
+                message = (
+                    "ORDER IS LIVE -- DO NOT RESUBMIT. passorder reached the "
+                    "broker and the order row exists (stock=%s action=%s "
+                    "price=%.2f volume=%d), but QMT had still not assigned "
+                    "order_sys_id after %d lookup(s), so this reply carries no "
+                    "id. Find it by remark %r, or in the 委托 list; it is not a "
+                    "rejection (issue #152)."
+                    % (request.stock_code, request.action, request.price,
+                       request.volume, settlement.attempts, request.remark)
+                )
+                settlement.server_error = message
+                if inline:
+                    self._last_server_error = message
                 return True
             if not final:
                 # Not there yet. QMT assigns the id asynchronously, so an early

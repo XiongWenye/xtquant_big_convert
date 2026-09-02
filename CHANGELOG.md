@@ -7,6 +7,24 @@
 
 ### 修复
 
+- **已到券商的委托被报成 `-1`（拒单）**（issue #152，@willzhqiang）：同步下单返回 `-1`，客户端打出 `ORDER_REJECTED`，而按同一个 remark 立刻回查，委托**就在券商那里**：`order_sysid 635093411 / status 50 REPORTED / cancelable true / 冻结 421.72`。
+
+  报告人**没有重试**。如果重试了，就是重复下单 —— 这才是这个 bug 危险的地方，而不只是返回值不对。
+
+  窗口在于 QMT 会先放出委托行、稍后才填 `m_strOrderSysID`。`_apply_order_lookup` 匹配到 remark 就当结算完成，哪怕委托号还是空的：回复带着 `order_sys_id=None` 发出去，客户端把它变成 `-1`。
+
+  **委托行存在本身就证明委托已经到了券商**，所以现在的做法是继续等委托号，而不是不带委托号就作答。到期仍然没有委托号时，用能用的最响的方式说出来 —— 客户端遇到 `server_error` 会抛异常，所以它变成一个点名 remark 的异常，而不是一个静默的 `-1`：
+
+  ```
+  ORDER IS LIVE -- DO NOT RESUBMIT. passorder reached the broker and the
+  order row exists (...), but QMT had still not assigned order_sys_id after
+  N lookup(s) ... Find it by remark 'xxx' ... it is not a rejection.
+  ```
+
+  措辞刻意和隔壁那条「委托没进系统」区分开 —— 后者含义正相反（委托根本没到券商），而且开头就让人去查 QMT 的 `运行模式`（#122）。在这里说那句话会把人指到完全错误的方向。
+
+  **未实盘验证**：触发这个窗口需要真实下单，本仓库不下真单。修复前 10 个新测试里有 5 个失败。
+
 - **全推订阅把期货代码大写了，订阅从此不推**（issue #95，@lzxN / @frank0532）：`subscribe_whole_quote(["cu2610.SF"])` 只推一帧然后没了，而 `CF701.ZF` 每 250ms 一推。那一帧是订阅时的**首帧快照**（走 `get_full_tick`，保留大小写），它后面的周期订阅从来没工作过。
 
   看着像交易所差异，其实是大小写：
