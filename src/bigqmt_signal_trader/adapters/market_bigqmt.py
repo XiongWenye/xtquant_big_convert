@@ -910,14 +910,23 @@ class BigQmtMarketDataProvider:
         "沪市基金", "深市基金", "沪深ETF",
     )
 
-    def get_sector_list(self):
-        """Return the list of sector names.
+    def get_sector_list(self, allow_fallback=False):
+        """Return the terminal's sector names, or say it cannot (issue #143).
 
-        Authoritative source is the xtdata SDK (xtdata.py line 784). In a Big
-        QMT (full terminal) process the SDK is present but cannot reach its
-        quote service, and ContextInfo has no get_sector_list method either.
-        In that case we fall back to a curated list of well-known sector names
-        so callers can still drive get_stock_list_in_sector(name).
+        The authoritative source is the xtdata SDK. Inside a Big QMT full
+        terminal the SDK is present but cannot reach its quote service
+        ("无法连接行情服务"), and ContextInfo has no get_sector_list at all --
+        so on this class of terminal there is no real answer.
+
+        This used to return ``_FALLBACK_SECTORS`` in that case: 13 curated
+        names, indistinguishable from a real listing. The caller cannot tell,
+        and a user's own sectors never appear no matter how many they created.
+        I gave a wrong answer on issue #130 by reading exactly that list and
+        believing it, which is the whole argument for raising instead.
+
+        Pass ``allow_fallback=True`` to opt into the curated names -- they are
+        still useful for driving ``get_stock_list_in_sector``, which does work.
+        Asking for them is fine; being handed them unasked is not.
         """
         def _via_context():
             return self._call_context("get_sector_list")
@@ -926,9 +935,20 @@ class BigQmtMarketDataProvider:
             result = self._native_or_context("get_sector_list", _via_context)
             if result:
                 return result
-        except (NotImplementedError, Exception):
+        except Exception:
             pass
-        return list(self._FALLBACK_SECTORS)
+        # A JSON-RPC caller sends "true"/"1"; a Python caller sends True.
+        if str(allow_fallback).strip().lower() in ("1", "true", "yes", "on"):
+            return list(self._FALLBACK_SECTORS)
+        raise NotImplementedError(
+            "get_sector_list cannot enumerate this terminal's sectors: the "
+            "native xtdata SDK is present but its quote service is unreachable "
+            "from inside Big QMT, and ContextInfo has no get_sector_list. It "
+            "used to answer with a hardcoded list of %d well-known names, "
+            "which looks exactly like a real listing and never contains your "
+            "own sectors (issue #143). Pass allow_fallback=True to get those "
+            "names deliberately -- get_stock_list_in_sector works with them."
+            % len(self._FALLBACK_SECTORS))
 
     def get_sector_info(self, sector_name=""):
         # xtdata SDK 函数，ContextInfo 无此方法，走 native SDK。
@@ -1185,12 +1205,171 @@ class BigQmtMarketDataProvider:
         return self._call_context("get_hkt_details", stock_code)
 
     # ------------------------------------------------------------------
-    # 自定义板块管理（写操作，仅 ContextInfo 支持）
+    # 自定义板块写入（issue #143）
+    #
+    # 三条通道都枚举过（probe_capabilities 的 sector_probe 块）：
+    #
+    #   ContextInfo        create_sector / get_sector / get_stock_list_in_sector
+    #   QMT 注入的全局函数  一个都没有
+    #   原生 xtdata SDK     add_sector / remove_sector / get_sector_list
+    #
+    # 文档 §4.7 记的那一族（create_sector_folder / add_stock_to_sector /
+    # reset_sector_stock_list / remove_stock_from_sector）在三条通道上都不
+    # 存在 —— 不是「还没实现」，是这台终端给不出来。所以它们在这里用
+    # add_sector 组合出来，而不是去找一个不存在的原生函数。
+    #
+    # 而 ContextInfo.create_sector 存在、能调、返回 None、什么都不做：实测
+    # 前后都是 13 个板块，新板块一个没建。所以每一次写入之后都回读校验。
+    # 宁可把一次成功的写入误报成失败，也不能再让调用方以为建好了 —— #142
+    # 就是这么来的，而静默的错比响亮的错难查得多。
     # ------------------------------------------------------------------
 
+    _SECTOR_WRITE_UNAVAILABLE = (
+        "%s cannot be performed on this terminal: the native xtdata sector API "
+        "(add_sector/remove_sector) is present but its quote service is "
+        "unreachable from inside Big QMT (\"无法连接行情服务\"), and Big QMT's "
+        "own ContextInfo exposes only create_sector, which accepts the call and "
+        "silently does nothing. Run probe_capabilities and read sector_probe to "
+        "see which channels this terminal has (issue #143)."
+    )
+
+    @staticmethod
+    def _sector_code_key(code):
+        """Compare membership without tripping over case or spacing."""
+        text = str(code or "").strip()
+        if not text:
+            return ""
+        try:
+            return normalize_stock_code(text)
+        except Exception:
+            return text.upper()
+
+    def _sector_members(self, sector_name):
+        """Current members, or [] when the sector does not exist yet.
+
+        Read-only and uncached: the caller is about to write, so the cached
+        listing used by _sector_codes would be exactly the wrong answer.
+        """
+        try:
+            return [str(code) for code in (
+                self.get_stock_list_in_sector(sector_name) or [])]
+        except Exception:
+            return []
+
+    def _write_sector(self, method_name, sector_name, stock_list):
+        """Push a full member list, preferring the only channel that works.
+
+        Returns whatever the channel returned; the caller verifies. Raises
+        NotImplementedError when no channel exists at all, so "impossible" and
+        "attempted but ineffective" stay distinguishable.
+        """
+        codes = [str(code) for code in (stock_list or [])]
+        module = self._native()
+        native_error = None
+        if module is not None and callable(getattr(module, "add_sector", None)):
+            try:
+                return module.add_sector(sector_name, codes)
+            except Exception as exc:
+                native_error = exc
+        context_info = getattr(self, "context_info", None)
+        if callable(getattr(context_info, "create_sector", None)):
+            # Known no-op on Big QMT 2.1.19.0 -- tried anyway because another
+            # build may honour it, and the caller's verify step catches it
+            # either way.
+            return self._call_context("create_sector", sector_name, codes)
+        raise NotImplementedError(
+            (self._SECTOR_WRITE_UNAVAILABLE % method_name)
+            + ("" if native_error is None
+               else " Native attempt failed with: %s: %s"
+                    % (native_error.__class__.__name__, native_error)))
+
+    def _verify_sector_members(self, method_name, sector_name,
+                               must_contain=(), must_not_contain=()):
+        """Read the sector back and confirm the write actually landed."""
+        members = {self._sector_code_key(code)
+                   for code in self._sector_members(sector_name)}
+        missing = [code for code in must_contain
+                   if self._sector_code_key(code) not in members]
+        lingering = [code for code in must_not_contain
+                     if self._sector_code_key(code) in members]
+        if missing or lingering:
+            detail = []
+            if missing:
+                detail.append("still missing %s" % (missing[:5],))
+            if lingering:
+                detail.append("still present %s" % (lingering[:5],))
+            raise RuntimeError(
+                "%s on sector %r reported no error but the sector did not "
+                "change (%s). Big QMT's ContextInfo.create_sector accepts the "
+                "call and does nothing; this terminal has no working sector "
+                "write channel (issue #143)."
+                % (method_name, sector_name, "; ".join(detail)))
+        return True
+
     def create_sector(self, sector_name, stock_list):
-        # ContextInfo stub: create_sector(sectorname, stocklist) — 创建/更新自定义板块。
-        return self._call_context("create_sector", sector_name, list(stock_list or []))
+        """Create (or overwrite) a custom sector and confirm it exists.
+
+        Signature deliberately NOT the ``(parent_node, sector_name, overwrite)``
+        form in docs §4.7: that function is absent from all three channels on
+        every terminal probed so far, while ``add_sector(name, stock_list)`` is
+        the shape the real SDK offers. Adopting a signature for a function that
+        does not exist would trade one wrong answer for another.
+        """
+        codes = [str(code) for code in (stock_list or [])]
+        self._write_sector("create_sector", sector_name, codes)
+        self._verify_sector_members("create_sector", sector_name, must_contain=codes)
+        return sector_name
+
+    def reset_sector_stock_list(self, sector, stock_list):
+        """Replace a sector's members outright."""
+        codes = [str(code) for code in (stock_list or [])]
+        self._write_sector("reset_sector_stock_list", sector, codes)
+        self._verify_sector_members("reset_sector_stock_list", sector,
+                                    must_contain=codes)
+        return True
+
+    def add_stock_to_sector(self, sector, stock_code):
+        """Add one code, keeping the existing members.
+
+        Read-merge-write rather than a bare append, so it is correct whether
+        the underlying channel replaces the list or merges into it -- the two
+        SDK generations disagree about that and this terminal cannot be asked.
+        """
+        code = str(stock_code or "").strip()
+        if not code:
+            raise ValueError("stock_code is required")
+        members = self._sector_members(sector)
+        if self._sector_code_key(code) in {self._sector_code_key(m) for m in members}:
+            return True
+        self._write_sector("add_stock_to_sector", sector, members + [code])
+        self._verify_sector_members("add_stock_to_sector", sector,
+                                    must_contain=[code])
+        return True
+
+    def remove_stock_from_sector(self, sector, stock_code):
+        """Drop one code, keeping the rest.
+
+        The verify step matters most here: if the channel merges instead of
+        replacing, the write "succeeds" and the code stays -- silently, which
+        is the failure mode this whole family is being fixed for.
+        """
+        code = str(stock_code or "").strip()
+        if not code:
+            raise ValueError("stock_code is required")
+        wanted = self._sector_code_key(code)
+        members = self._sector_members(sector)
+        remaining = [m for m in members if self._sector_code_key(m) != wanted]
+        if len(remaining) == len(members):
+            return True                      # not a member; nothing to do
+        self._write_sector("remove_stock_from_sector", sector, remaining)
+        self._verify_sector_members("remove_stock_from_sector", sector,
+                                    must_not_contain=[code])
+        return True
+
+    def create_sector_folder(self, parent_node, folder_name, overwrite=False):
+        """No channel on any probed terminal offers this."""
+        raise NotImplementedError(
+            self._SECTOR_WRITE_UNAVAILABLE % "create_sector_folder")
 
     # ------------------------------------------------------------------
     # 基础查询辅助
@@ -1349,26 +1528,34 @@ class BigQmtMarketDataProvider:
     # ------------------------------------------------------------------
 
     def add_sector(self, sector_name, stock_list):
-        # xtdata SDK: add_sector(sector_name, stock_list) — 向自定义板块追加股票。
-        # ContextInfo 用 create_sector（覆盖式），SDK 用 add_sector（追加式）。
-        module = self._native()
-        if module is not None and hasattr(module, "add_sector"):
-            try:
-                return module.add_sector(sector_name, list(stock_list or []))
-            except Exception:
-                pass
-        # ContextInfo fallback：create_sector 是覆盖式，语义略不同但可用。
-        return self._call_context("create_sector", sector_name, list(stock_list or []))
+        """xtdata SDK ``add_sector(sector_name, stock_list)``.
+
+        Used to swallow the native failure and fall through to
+        ContextInfo.create_sector -- which does nothing, so on Big QMT this was
+        a silent no-op too (issue #143). It now goes through the same
+        write-then-verify path as the rest of the family.
+        """
+        codes = [str(code) for code in (stock_list or [])]
+        self._write_sector("add_sector", sector_name, codes)
+        self._verify_sector_members("add_sector", sector_name, must_contain=codes)
+        return True
 
     def remove_sector(self, sector_name):
-        # xtdata SDK: remove_sector(sector_name) — 删除自定义板块。
+        """xtdata SDK ``remove_sector(sector_name)`` -- delete a custom sector.
+
+        No ContextInfo equivalent exists (`remove_sector` is absent there), so
+        this is the one member of the family with a single channel.
+        """
         module = self._native()
-        if module is not None and hasattr(module, "remove_sector"):
+        if module is not None and callable(getattr(module, "remove_sector", None)):
             try:
                 return module.remove_sector(sector_name)
-            except Exception:
-                pass
-        return self._raise_unavailable("remove_sector")
+            except Exception as exc:
+                raise RuntimeError(
+                    "remove_sector(%r) failed on the native xtdata SDK: %s: %s"
+                    % (sector_name, exc.__class__.__name__, exc))
+        raise NotImplementedError(
+            self._SECTOR_WRITE_UNAVAILABLE % "remove_sector")
 
     # ------------------------------------------------------------------
     # 数据下载扩展

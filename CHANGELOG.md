@@ -7,6 +7,24 @@
 
 ### 修复
 
+- **板块写入 API：从静默空操作改成写完回读校验**（issue #143，由 #142 @DwayneZhang 引出）：`create_sector` 在大 QMT 上「能调、返回 None、什么都不做」—— 实测板块数量前后都是 13，调用方却以为建好了。这是最坏的一种失败。
+
+  先把三条通道枚举了一遍（`probe_capabilities` 新增 `sector_probe` 块，只读）：
+
+  | | 有什么 |
+  |---|---|
+  | `ContextInfo` | `create_sector`、`get_sector`、`get_stock_list_in_sector` |
+  | QMT 注入的全局函数 | **一个都没有** |
+  | 原生 xtdata SDK | `add_sector`、`remove_sector`、`get_sector_list` 等，但 `无法连接行情服务！` |
+
+  **这推翻了 issue #143 自己的说法**：`create_sector_folder` / `add_stock_to_sector` / `reset_sector_stock_list` / `remove_stock_from_sector` 不是「QMT 全局函数还没捕获」，它们在三条通道上都不存在。文档 §4.7 那个 `create_sector(parent_node, sector_name, overwrite)` 三参数签名同样不存在，所以签名保持 `(sector_name, stock_list)` —— 那才是真 SDK 给的形状，改成一个不存在的签名只是把一个错答案换成另一个。
+
+  现在：这一族按 `add_sector` 组合实现（`add_stock_to_sector` 用读-合并-写，所以底层是覆盖式还是追加式都对），**每次写入后回读校验**，没写进去就抛错并说明原因。宁可把一次成功的写入误报成失败，也不能再让调用方以为写进去了。`create_sector_folder` 三条通道都没有，直接抛 `NotImplementedError`。
+
+- **`get_sector_list` 不再用硬编码列表冒充真数据**（issue #143）：拿不到真实板块时它会返回 13 个常用板块名，和真列表**长得一模一样**，调用方分辨不出来，用户自建的板块永远不出现。我自己就是读了这个列表在 #130 给过一条错的建议。
+
+  现在拿不到就抛错，错误信息里写明原因和出路；想要那 13 个名字就显式传 `allow_fallback=True` —— 它们驱动 `get_stock_list_in_sector` 仍然有效（沪深A股 5217 只，实测）。**主动要是可以的，不问就塞给你不行。**
+
 - **回测结束时客户端超时，而不是被告知「结束了」**（issue #150，@chinapsu）：一次跑完的回测在最后抛 `TimeoutError: backtest ZMQ request timed out: next_bar`。
 
   告知机制本来就有 —— 状态里带 `done`，`BacktestStrategy.run()` 见到就跳出循环再调 `finish()`。信号送不到，是因为 QMT 实际调用的那个入口顺序不对：

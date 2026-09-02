@@ -251,8 +251,13 @@ MARKET_DATA_METHODS = {
     "get_north_finance_change",
     "get_hkt_statistics",
     "get_hkt_details",
-    # 自定义板块（写）
+    # 自定义板块（写）。issue #143：这一族以前只有 create_sector，而它在大 QMT
+    # 上是静默空操作；其余几个在白名单里有名字却没实现，调用报 not implemented。
     "create_sector",
+    "create_sector_folder",
+    "add_stock_to_sector",
+    "remove_stock_from_sector",
+    "reset_sector_stock_list",
     # 基础查询辅助
     "get_stock_name",
     "get_stock_type",
@@ -697,7 +702,87 @@ class BigQmtRpcHandlers:
                     "available": True, "ok": False,
                     "error": "%s: %s" % (exc.__class__.__name__, exc),
                 }
+        info["sector_probe"] = self._probe_sector_channels()
         return info
+
+    # 板块通道探测（issue #143）。写入板块有三条可能的通道，名字还各不相同：
+    #   * ContextInfo.create_sector           大 QMT 内置 Python
+    #   * 原生 xtdata.add_sector/remove_sector MiniQMT SDK（要行情服务）
+    #   * QMT 注入的全局函数                   文档 §4.7 那一族
+    # 哪条能用只有终端自己知道，所以枚举而不是查固定表 —— 上面那两个 block
+    # 就是查表，于是 add_stock_to_sector / reset_sector_stock_list 根本没被
+    # 看见过。全部只读：不建板块、不改成分股。
+    _SECTOR_WRITE_NAMES = (
+        "create_sector", "create_sector_folder", "add_stock_to_sector",
+        "remove_stock_from_sector", "reset_sector_stock_list",
+        "add_sector", "remove_sector", "reset_sector",
+    )
+
+    @staticmethod
+    def _enumerate_sector_names(target):
+        if target is None:
+            return []
+        try:
+            return sorted(n for n in dir(target)
+                          if "sector" in n.lower() and callable(getattr(target, n, None)))
+        except Exception:
+            return []
+
+    def _probe_sector_channels(self):
+        report = {}
+        context_info = getattr(self.market_data, "context_info", None)
+        report["contextinfo_sector_names"] = self._enumerate_sector_names(context_info)
+        report["qmt_global_sector_names"] = sorted(
+            name for name, func in (self.qmt_api or {}).items()
+            if "sector" in name.lower() and callable(func))
+        report["write_names_found"] = {
+            name: {
+                "contextinfo": callable(getattr(context_info, name, None)),
+                "qmt_global": callable((self.qmt_api or {}).get(name)),
+            }
+            for name in self._SECTOR_WRITE_NAMES
+        }
+
+        native = None
+        try:
+            from .adapters.market_bigqmt import _load_native_xtdata
+
+            native = _load_native_xtdata()
+        except Exception as exc:
+            report["native_xtdata_error"] = "%s: %s" % (exc.__class__.__name__, exc)
+        report["native_xtdata_loaded"] = native is not None
+        report["native_sector_names"] = self._enumerate_sector_names(native)
+        for name in self._SECTOR_WRITE_NAMES:
+            if name in report["write_names_found"]:
+                report["write_names_found"][name]["native_xtdata"] = callable(
+                    getattr(native, name, None))
+
+        # 唯一真调的一次，而且是读：它回答「这台终端到底能不能列出真实板块」,
+        # 也就是 get_sector_list 现在是不是在拿硬编码兜底冒充真数据。
+        if native is not None and callable(getattr(native, "get_sector_list", None)):
+            try:
+                listing = native.get_sector_list() or []
+                report["native_get_sector_list"] = {
+                    "ok": True, "count": len(listing),
+                    "sample": [str(x) for x in list(listing)[:8]],
+                }
+            except Exception as exc:
+                report["native_get_sector_list"] = {
+                    "ok": False, "error": "%s: %s" % (exc.__class__.__name__, exc)}
+        else:
+            report["native_get_sector_list"] = {"ok": False, "error": "not available"}
+        try:
+            reported = self.market_data.get_sector_list() or []
+            fallback = list(getattr(self.market_data, "_FALLBACK_SECTORS", ()) or ())
+            report["get_sector_list_now"] = {
+                "count": len(reported),
+                "is_the_hardcoded_fallback": list(reported) == fallback,
+                "sample": [str(x) for x in list(reported)[:8]],
+            }
+        except Exception as exc:
+            report["get_sector_list_now"] = {
+                "error": "%s: %s" % (exc.__class__.__name__, exc)}
+        return report
 
     # ------------------------------------------------------------------
     # 全推行情订阅控制（引用计数共享 ContextInfo.subscribe_whole_quote）。

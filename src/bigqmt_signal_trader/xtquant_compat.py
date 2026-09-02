@@ -2191,8 +2191,15 @@ class BigQmtXtData:
             callback(result)
         return result
 
-    def get_sector_list(self):
-        return self._call("get_sector_list")
+    def get_sector_list(self, allow_fallback=False):
+        """Sector names, or an error saying the terminal cannot list them.
+
+        ``allow_fallback=True`` opts into the 13 curated well-known names,
+        which still drive ``get_stock_list_in_sector``. Big QMT cannot
+        enumerate real sectors at all, and handing back the curated list
+        unasked made a fake answer indistinguishable from a real one (#143).
+        """
+        return self._call("get_sector_list", allow_fallback=bool(allow_fallback))
 
     def get_sector_info(self, sector_name=""):
         return self._call("get_sector_info", sector_name=sector_name)
@@ -2421,8 +2428,24 @@ class BigQmtXtData:
     def get_hkt_details(self, stock_code):
         return self._call("get_hkt_details", stock_code=stock_code)
 
+    # 自定义板块写入（issue #143）。每一个都在服务端写入后回读校验，所以
+    # 「没报错」现在真的代表写进去了 —— 以前 create_sector 是静默空操作。
     def create_sector(self, sector_name, stock_list):
         return self._call("create_sector", sector_name=sector_name, stock_list=list(stock_list or []))
+
+    def create_sector_folder(self, parent_node, folder_name, overwrite=False):
+        return self._call("create_sector_folder", parent_node=parent_node,
+                          folder_name=folder_name, overwrite=overwrite)
+
+    def reset_sector_stock_list(self, sector, stock_list):
+        return self._call("reset_sector_stock_list", sector=sector,
+                          stock_list=list(stock_list or []))
+
+    def add_stock_to_sector(self, sector, stock_code):
+        return self._call("add_stock_to_sector", sector=sector, stock_code=stock_code)
+
+    def remove_stock_from_sector(self, sector, stock_code):
+        return self._call("remove_stock_from_sector", sector=sector, stock_code=stock_code)
 
     def get_stock_name(self, stock):
         return self._call("get_stock_name", stock=stock)
