@@ -214,18 +214,51 @@ def render_client_config(answers):
 
 
 def render_single_file_config_block(answers):
-    """The config block the single-file builds carry at the top of the file."""
+    """The config block the single-file builds carry at the top of the file.
+
+    This block IS the config for a single-file deployment: the build never
+    reads bigqmt_signal_trader_local_config.py from disk -- it synthesises that
+    module from the block embedded here. So anything render_server_config emits
+    and this does not is simply lost, silently, and editing local_config.py on
+    the QMT machine changes nothing (issue #153).
+
+    Two keys used to be missing:
+
+      * ``zmq`` -- so the transport fell back to DEFAULT_ZMQ_HOST and bound
+        tcp://127.0.0.1 no matter what address was answered. The reporter saw
+        `zmq started bound=tcp://127.0.0.1:15618` while their local_config said
+        0.0.0.0, and had to patch DEFAULT_ZMQ_HOST in the generated file.
+      * ``transport`` -- the no-redis FLAT build forces zmq afterwards so it
+        got away with it, but the base64 single_file build does not: answering
+        transport=zmq there produced a server that ran redis while the client
+        spoke zmq, which is exactly the "客户端 transport 和服务端不匹配"
+        timeout the ping check reports.
+    """
+    transport = str(answers["transport"])
     lines = [
         "BIGQMT_ACCOUNT_ID = %r" % str(answers["account_id"]),
         "",
         "BIGQMT_ACCOUNT_TYPE = %r" % str(answers["account_type"]),
         "",
         "BIGQMT_REDIS_CONFIG = {",
+        '    "transport": %r,' % transport,
         '    "host": %r,' % str(answers["host"]),
         '    "port": %d,' % int(answers["port"]),
         '    "db": %d,' % int(answers["db"]),
         '    "username": %r,' % str(answers["username"]),
         '    "password": %r,' % str(answers["password"]),
+    ]
+    if transport == "zmq":
+        port = _zmq_default_port(answers["account_id"])
+        bind_host = _zmq_server_bind_host(answers["host"])
+        lines.extend([
+            "    # Same-host ZMQ stays on loopback. A remote QMT address makes the",
+            "    # server bind all interfaces; restrict that port with a firewall.",
+            "    # A single-file build has no local_config.py to read, so this",
+            "    # block is the only place the bind address can come from (#153).",
+            '    "zmq": {"bind_address": "tcp://%s:%d"},' % (bind_host, port),
+        ])
+    lines.extend([
         '    "rpc_allow_order_methods": %r,' % bool(answers["allow_order_methods"]),
         '    "rpc_process_in_listener": True,',
         '    "rpc_listener_methods": ("*",),',
@@ -246,7 +279,7 @@ def render_single_file_config_block(answers):
         '    "exec_events_enabled": True,',
         '    "exec_events_debug_raw_fields": False,',
         "}",
-    ]
+    ])
     return "\n".join(lines)
 
 
