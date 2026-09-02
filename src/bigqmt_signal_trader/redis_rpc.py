@@ -189,6 +189,11 @@ SELL_ORDER_TYPES = {"24", "STOCK_SELL", "SELL", "S"}
 CANCELABLE_ORDER_STATUSES = {"50", "55"}
 CANCELED_ORDER_STATUSES = {"53", "54"}
 TERMINAL_NON_CANCEL_ORDER_STATUSES = {"56", "57"}
+# 51 已报待撤 / 52 部成待撤: the exchange has ACCEPTED the cancel and it is
+# on its way. Neither cancelled nor failed -- keep waiting, and at the
+# deadline report the acceptance instead of a "still status 51" failure
+# (issue #151; the narrow-window twin of the #148 false negative).
+CANCEL_IN_FLIGHT_STATUSES = {"51", "52"}
 SAFE_B64_PREFIX = "b64s:"
 SAFE_B64_DIGIT_ENCODE = str.maketrans("0123456789", "!#$%&()*~?")
 SAFE_B64_DIGIT_DECODE = str.maketrans("!#$%&()*~?", "0123456789")
@@ -445,13 +450,15 @@ class OrderSettlement(object):
 
 
 class CancelSettlement(object):
-    """One falsey native cancel result awaiting the order's actual status.
+    """One native cancel result awaiting the order's actual status.
 
     Full QMT's injected ``cancel`` return is not reliable across terminal
-    builds.  On Guojin 2.1.19.0 it returned falsey even though the broker
-    acknowledged the request and the order moved to status 54 within 67 ms
-    (issue #148).  Like order-id settlement, status readback must stay on the
-    adjust thread because get_trade_detail_data is empty on worker threads.
+    builds -- in either direction.  On Guojin 2.1.19.0 it returned falsey
+    even though the broker acknowledged the request and the order moved to
+    status 54 within 67 ms (issue #148), and truthy for orders that do not
+    exist at all (issue #151).  Like order-id settlement, status readback
+    must stay on the adjust thread because get_trade_detail_data is empty on
+    worker threads.
     """
 
     __slots__ = ("order_ref", "account_id", "result", "deadline", "attempts",
@@ -1736,28 +1743,36 @@ class BigQmtRpcHandlers:
         )
         result = self.order_gateway.cancel(order_ref)
 
-        # A truthy native return keeps the existing fast path.  A falsey one is
-        # ambiguous on full QMT: issue #148 captured cancel() returning falsey
-        # while the broker accepted the request and status became 54.  Park only
-        # that ambiguous response and let the main-thread order snapshot settle
-        # it; never turn a genuinely filled/rejected/still-active order into a
-        # successful cancel.
-        if getattr(result, "success", None) is False:
-            settlement = CancelSettlement(
-                order_ref,
-                account_id,
-                result,
-                _monotonic() + self.order_settle_timeout_seconds,
-            )
-            if self.settle_orders_inline:
-                try:
-                    import time as _time
-                    _time.sleep(self.order_settle_timeout_seconds)
-                    self._apply_cancel_lookup(settlement, final=True)
-                except Exception:
-                    pass
-            else:
-                self._pending_settlement = settlement
+        # The native cancel return is not trustworthy in EITHER direction.
+        # #148: falsey while the broker accepted the cancel (status became 54
+        # within 67 ms).  #151: truthy for an order that does not exist at
+        # all -- the return describes "the request was sent", not "the order
+        # was cancelled".  So both directions settle against the order
+        # snapshot now.  A truthy return gets ONE immediate lookup first: the
+        # common case (order exists, already 53/54) confirms without an extra
+        # round trip, so the fast path stays fast; only an unconfirmed truthy
+        # pays the settle wait.
+        settlement = CancelSettlement(
+            order_ref,
+            account_id,
+            result,
+            _monotonic() + self.order_settle_timeout_seconds,
+        )
+        if getattr(result, "success", None) is not False:
+            try:
+                if self._apply_cancel_lookup(settlement):
+                    return result
+            except Exception:
+                pass  # fall through to the parked/inline wait below
+        if self.settle_orders_inline:
+            try:
+                import time as _time
+                _time.sleep(self.order_settle_timeout_seconds)
+                self._apply_cancel_lookup(settlement, final=True)
+            except Exception:
+                pass
+        else:
+            self._pending_settlement = settlement
         return result
 
     def _apply_cancel_lookup(self, settlement, final=False):
@@ -1803,6 +1818,20 @@ class BigQmtRpcHandlers:
             settlement.result.success = False
             settlement.result.message = (
                 "cancel was not confirmed: order %s reached status %s"
+                % (order_sys_id, status)
+            )
+            return True
+        if status in CANCEL_IN_FLIGHT_STATUSES:
+            if not final:
+                return False
+            # The exchange has accepted the cancel and it is on its way --
+            # 51/52 transition to 54 in milliseconds normally, slower around
+            # the close or under congestion. That is not a failed cancel, and
+            # reporting one is the #148 false negative through a narrower
+            # window (issue #151).
+            settlement.result.success = True
+            settlement.result.message = (
+                "cancel accepted by exchange, still in flight: order %s is status %s"
                 % (order_sys_id, status)
             )
             return True

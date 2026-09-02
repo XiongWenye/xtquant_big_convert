@@ -420,8 +420,12 @@ class AsyncCancelSettlementTest(unittest.TestCase):
         self.assertFalse(response["data"]["success"])
         self.assertIn("cancel status lookup failed", response["data"]["message"])
 
-    def test_truthy_native_return_keeps_the_immediate_fast_path(self):
-        gateway = FalseyCancelGateway(["50"], native_success=True)
+    def test_truthy_native_return_verified_by_immediate_lookup(self):
+        # #151: truthy is no more trustworthy than falsey (a cancel of an
+        # order that does not exist returns success=True). The fast path
+        # survives, but only through one immediate status lookup -- not by
+        # believing the native return.
+        gateway = FalseyCancelGateway(["54"], native_success=True)
         redis_client, service = self._service(gateway)
         self._cancel(service)
 
@@ -430,8 +434,22 @@ class AsyncCancelSettlementTest(unittest.TestCase):
         response = json.loads(
             redis_client.kv["bigqmt:rpc:resp:acct:cancel-request-1"])
         self.assertTrue(response["data"]["success"])
-        self.assertEqual(gateway.lookups, 0)
+        self.assertEqual(gateway.lookups, 1)
         self.assertEqual(service.pending_settlement_count(), 0)
+
+    def test_truthy_native_return_without_confirmation_is_not_success(self):
+        # The #151 shape exactly: native success=True, order still active
+        # at the deadline -> the reply must not be a bare success.
+        gateway = FalseyCancelGateway(["50"], native_success=True)
+        redis_client, service = self._service(gateway, timeout=0.0)
+        self._cancel(service)
+
+        service.drain_pending()
+
+        response = json.loads(
+            redis_client.kv["bigqmt:rpc:resp:acct:cancel-request-1"])
+        self.assertFalse(response["data"]["success"])
+        self.assertIn("is still status 50", response["data"]["message"])
 
 
 class AsyncOrderSettlementTest(unittest.TestCase):
