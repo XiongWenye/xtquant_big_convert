@@ -7,6 +7,22 @@
 
 ### 修复
 
+- **回测结束时客户端超时，而不是被告知「结束了」**（issue #150，@chinapsu）：一次跑完的回测在最后抛 `TimeoutError: backtest ZMQ request timed out: next_bar`。
+
+  告知机制本来就有 —— 状态里带 `done`，`BacktestStrategy.run()` 见到就跳出循环再调 `finish()`。信号送不到，是因为 QMT 实际调用的那个入口顺序不对：
+
+  ```python
+  def stop(ContextInfo=None):
+      _RUNTIME.on_qmt_stop()      # 置 qmt_completed，唤醒等待者
+      _RUNTIME.stop_server()      # ……同时把 socket 拆了
+  ```
+
+  客户端要么正停在 `next_bar` 里（唤醒了，但回复还得走 ZMQ 回去，而 socket 正在关），要么两次调用之间（`next_bar` 发进一个已经没人的端口）。就算赢了这个竞争也只是把失败推后一步 —— `run()` 紧接着还要调 `finish()`。
+
+  `stop_server` 本身没错，它是 #109 的修复（端口留给了一个已经不存在的策略，下次跑起不来）。所以关闭流程现在两件事都做：**先把结局交给客户端，再释放端口** —— 和 `reload_deployment` 等响应队列排空再 `reset_app` 是同一个形状。等待有上限（默认 10 秒，`stop_grace_seconds` 可配），走掉的客户端不会把固定端口占死；从没连过客户端时完全不等，手动点停止不会平白多花 10 秒。
+
+  已有测试没盖到是因为它直接调 `session.on_qmt_stop()`，**从不走模块级 `stop()`** —— 这个 issue 讲的那段拆除逻辑根本不在测试里。
+
 - **撤单：原生返回为假时，改用委托状态确认**（issue #148，PR #149，@willzhqiang）：大 QMT 注入的 `cancel` 返回值描述的是「撤单请求有没有发出去」，不是撤单结果。@willzhqiang 的终端上实测到原生返回为假、但券商已受理且委托 67ms 内从状态 50 变成 54 —— 桥把一次成功的撤单报成了失败。
 
   现在原生返回为假时不再直接当失败，而是把回复挂起，在 adjust 线程上按 `order_sys_id` 精确回读委托状态：53/54（部撤/已撤）报成功，56/57（已成/废单）、查询失败、委托查不到、超时仍活跃报失败。原生返回为真仍走原来的快速路径。
