@@ -190,6 +190,47 @@ def _detach_existing_handlers(logger):
             pass
 
 
+def _log_file_name():
+    """Log file name, scoped so two processes never share one file (#139/#144).
+
+    A user running two bridges at once -- one live account, one simulated --
+    got both clients writing the same ~/.cache/bigqmt/logs/bigqmt.log. Two OS
+    handles on one file means TimedRotatingFileHandler can never rename it on
+    Windows:
+
+        PermissionError: [WinError 32] ... 'bigqmt.log' -> 'bigqmt.log.2026-09-01'
+
+    raised on every write, and rotation never succeeding means backupCount
+    pruning never runs either. No amount of in-process handler bookkeeping
+    fixes that -- the other handle belongs to another process.
+
+    Account id first: it is stable across restarts, so a bridge keeps writing
+    the same file and rotation still has something to roll. PID otherwise.
+    BIGQMT_LOG_NAME pins it explicitly for anyone who wants the old behaviour.
+    """
+    explicit = str(os.environ.get("BIGQMT_LOG_NAME") or "").strip()
+    if explicit:
+        return explicit
+    account = str(os.environ.get("BIGQMT_ACCOUNT_ID") or "").strip()
+    tag = "".join(ch for ch in account if ch.isalnum()) or ("pid%d" % os.getpid())
+    return "bigqmt-%s.log" % tag
+
+
+def _tolerant_rotator(source, dest):
+    """Rename for rotation, but never raise if the file is held.
+
+    Belt and braces next to _log_file_name: someone pinning BIGQMT_LOG_NAME
+    across two processes is back to a shared file, and a failed rename must not
+    turn every subsequent log write into a traceback in the QMT panel. Losing
+    one rotation is a smaller problem than losing the log's readability.
+    """
+    try:
+        if os.path.exists(source):
+            os.replace(source, dest)
+    except Exception:
+        pass
+
+
 def _setup():
     global _initialized
     if _initialized:
@@ -214,7 +255,7 @@ def _setup():
     log_dir = _resolve_log_dir()
     if log_dir is not None:
         try:
-            fname = os.path.join(log_dir, "bigqmt.log")
+            fname = os.path.join(log_dir, _log_file_name())
             file_handler = logging.handlers.TimedRotatingFileHandler(
                 fname,
                 when="midnight",
@@ -223,6 +264,7 @@ def _setup():
                 encoding="utf-8",
                 utc=False,
             )
+            file_handler.rotator = _tolerant_rotator
             file_handler.setFormatter(fmt)
             logger.addHandler(file_handler)
             _cleanup_old_logs(log_dir, int(os.environ.get("BIGQMT_LOG_RETENTION_DAYS", 7)))
