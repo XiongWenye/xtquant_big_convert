@@ -36,6 +36,7 @@ if _load_bridge_module is not None:
     _adapter_factory = _load_bridge_module("bigqmt_signal_trader.adapter_factory")
     _runner = _load_bridge_module("bigqmt_signal_trader.runner")
     _runtime_bigqmt = _load_bridge_module("bigqmt_signal_trader.runtime_bigqmt")
+    _order_watch = _load_bridge_module("bigqmt_signal_trader.order_watch")
     _default_build_app = _adapter_factory.build_app
     forward_order_event = _runner.forward_order_event
     forward_trade_event = _runner.forward_trade_event
@@ -55,6 +56,21 @@ else:
         tick_app,
     )
     from bigqmt_signal_trader.runtime_bigqmt import BigQmtRuntimeAdapter
+    from bigqmt_signal_trader import order_watch as _order_watch
+
+
+# The order watch table (issue #164) lives at module level: created at module
+# load, written from the C++ callback thread, read from the adjust thread.
+_order_watch_table = _order_watch.OrderWatchTable()
+
+
+def _note_order_watch(order_info):
+    """Learn remark->sysid and sysid->status from a raw QMT orderInfo."""
+    try:
+        _order_watch_table.note(
+            _exec_events.normalize_order_event(order_info, ""))
+    except Exception:
+        pass
 
 
 # exec_events is loaded here, at module load, and never from inside the
@@ -712,6 +728,8 @@ def _build_rpc_service(context_info, app, config):
     _store_redis = response_redis_client or redis_client or _exec_event_redis(config)
     handlers.download_job_redis_client = _store_redis
     handlers.order_identity_redis_client = _store_redis
+    # Settlement reads the callback-fed watch table first (issue #164).
+    handlers.order_watch_table = _order_watch_table
     # Whether _pump_download_jobs will actually run queued jobs. The submit RPC
     # needs it: with the redis client now wired on every transport, a submit
     # would otherwise be accepted into a queue that nothing drains.
@@ -1722,6 +1740,8 @@ def _publish_exec_event(kind, obj, context_info=None):
 
 def order_callback(ContextInfo, orderInfo):
     """Standard Big QMT order callback."""
+    # Settlement feeds on this even when client push is off (issue #164).
+    _note_order_watch(orderInfo)
     _publish_exec_event("order", orderInfo, ContextInfo)
     return forward_order_event(BigQmtRuntimeAdapter.to_order_event(orderInfo))
 

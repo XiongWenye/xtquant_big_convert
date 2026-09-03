@@ -5,6 +5,9 @@
 
 ### 修复
 
+- **结算不再盲轮询：回调把委托号/状态推给我们了**（issue #164）：下单/撤单结算原来在 adjust 主线程上一轮一轮 `query_orders`（实测一次撤单 3.6s 打了 135 轮）。新增回调喂养的 `OrderWatchTable`（remark→委托号、委托号→状态，有界 FIFO + 24h TTL，C++ 回调线程写、adjust 线程读，普通 dict+锁）：结算先查表，命中即结算、零轮询；查不到回落原有轮询（模拟模式没有回调，轮询保留为兜底）。单测 11 个（含两条快路径零查询、回退路径、表语义/TTL/有界）。**生效需重启策略**（改了顶层 strategy 文件）。
+
+
 - **按 strategy_name 过滤查委托，返回的行却 strategy_name=''**（issue #156 跟进，@kingtsi）：过滤本身有效（QMT 按策略名过滤返回 15 条），但委托行构建缺成交行早就有的「过滤兜底」——给了过滤器时，每行按构造就属于它。补上。实盘验证：`query_stock_orders(strategy_name='TEST')` 返回 2 条且 `strategy_name='TEST'`。另外新增诊断 RPC `probe_order_identity`（传 remark 返回身份链每环状态：redis 是否接线/key 名/redis 命中/进程内兜底命中），「策略名读不回」类问题以后一条调用就能定位断在哪环。
 
 

@@ -1687,6 +1687,20 @@ class BigQmtRpcHandlers:
         """
         request = settlement.order_request
         settlement.attempts += 1
+        # Fast path: QMT's order_callback already pushed the answer
+        # (issue #164). A miss means nothing -- fall through to the poll.
+        watch = getattr(self, "order_watch_table", None)
+        if watch is not None:
+            try:
+                watched_sysid = watch.sysid_for_remark(request.remark)
+            except Exception:
+                watched_sysid = None
+            if watched_sysid:
+                try:
+                    settlement.result.order_sys_id = watched_sysid
+                except Exception:
+                    pass
+                return True
         try:
             orders = self.order_gateway.query_orders(request.account_id, "") or []
             by_remark = [
@@ -1915,41 +1929,8 @@ class BigQmtRpcHandlers:
             self._pending_settlement = settlement
         return result
 
-    def _apply_cancel_lookup(self, settlement, final=False):
-        """Resolve an ambiguous native cancel return from the order snapshot."""
-        settlement.attempts += 1
-        order_sys_id = str(settlement.order_ref.order_sys_id or "")
-        try:
-            strict_query = getattr(self.order_gateway, "query_orders_strict", None)
-            if callable(strict_query):
-                orders = strict_query(settlement.account_id, "") or []
-            else:
-                orders = self.order_gateway.query_orders(settlement.account_id, "") or []
-        except Exception as exc:
-            if not final:
-                return False
-            settlement.result.success = False
-            settlement.result.message = (
-                "cancel status lookup failed after %d attempt(s): %s: %s"
-                % (settlement.attempts, exc.__class__.__name__, exc)
-            )
-            return True
-
-        matches = [
-            order for order in orders
-            if str(getattr(order, "order_sys_id", "") or "") == order_sys_id
-        ]
-        if not matches:
-            if not final:
-                return False
-            settlement.result.success = False
-            settlement.result.message = (
-                "cancel was not confirmed: order %s was not found after %d lookup(s)"
-                % (order_sys_id, settlement.attempts)
-            )
-            return True
-
-        status = str(getattr(matches[0], "status", "") or "")
+    def _settle_cancel_from_status(self, settlement, status, order_sys_id, final):
+        """One status answer, from the watch table or the snapshot row."""
         if status in CANCELED_ORDER_STATUSES:
             settlement.result.success = True
             settlement.result.message = ""
@@ -1983,6 +1964,55 @@ class BigQmtRpcHandlers:
             % (settlement.attempts, order_sys_id, status or "unknown")
         )
         return True
+
+    def _apply_cancel_lookup(self, settlement, final=False):
+        """Resolve an ambiguous native cancel return from the order snapshot."""
+        settlement.attempts += 1
+        order_sys_id = str(settlement.order_ref.order_sys_id or "")
+        # Fast path: the order's own status change was pushed to us by QMT's
+        # order_callback (issue #164). A table miss falls through to the poll.
+        watch = getattr(self, "order_watch_table", None)
+        if watch is not None:
+            try:
+                watched = watch.status_for_sysid(order_sys_id)
+            except Exception:
+                watched = None
+            if watched is not None:
+                return self._settle_cancel_from_status(
+                    settlement, str(watched), order_sys_id, final)
+        try:
+            strict_query = getattr(self.order_gateway, "query_orders_strict", None)
+            if callable(strict_query):
+                orders = strict_query(settlement.account_id, "") or []
+            else:
+                orders = self.order_gateway.query_orders(settlement.account_id, "") or []
+        except Exception as exc:
+            if not final:
+                return False
+            settlement.result.success = False
+            settlement.result.message = (
+                "cancel status lookup failed after %d attempt(s): %s: %s"
+                % (settlement.attempts, exc.__class__.__name__, exc)
+            )
+            return True
+
+        matches = [
+            order for order in orders
+            if str(getattr(order, "order_sys_id", "") or "") == order_sys_id
+        ]
+        if not matches:
+            if not final:
+                return False
+            settlement.result.success = False
+            settlement.result.message = (
+                "cancel was not confirmed: order %s was not found after %d lookup(s)"
+                % (order_sys_id, settlement.attempts)
+            )
+            return True
+
+        status = str(getattr(matches[0], "status", "") or "")
+        return self._settle_cancel_from_status(
+            settlement, status, order_sys_id, final)
 
 
 def _bool_value(value, default=False):
