@@ -3,6 +3,13 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
 
+## [未发布]
+
+### 修复
+
+- **`test_all_apis.py` 在 zmq 部署下全挂**（issue #157，@simonfantasy）：脚本的 `_call` 只会 `call_redis_rpc`——zmq 配置下 ping 必超时、后面每个用例跟着挂，而桥本身是好的（报告人自己用 ZmqTransport 手动 ping 证明了）。现在脚本按配置构造统一调用器（zmq 走 `ZmqTransport`，信封与客户端 `call()` 一致），`redis` 改为懒导入（NO_REDIS_FLAT 无 redis 客户端库的部署也能跑）。实盘验证：本机 zmq 桥上全量 18 OK / 0 超时（`get_sector_list` 的 FAIL 是 #143 之后的诚实报错，`query_stock_position` 空为既有行为，均非本次引入）。
+
+
 ## [0.3.15] - 2026-09-03
 
 ### 新增
