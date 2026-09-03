@@ -2658,7 +2658,10 @@ class BigQmtXtTrader:
         """
         from .sync import sync_deployment as _sync
 
-        info = self.get_deployment_info()
+        # get_deployment_info lives on BigQmtXtData; this class never had it,
+        # so xt_trader.sync_deployment() died with AttributeError. Call the
+        # RPC directly -- the trader's client is the same one.
+        info = self.client.call("get_deployment_info", {}) or {}
         target = info.get("qmt_python_dir") or ""
         if not target:
             log.warning("sync_deployment: the bridge did not report a "

@@ -7,7 +7,9 @@
 
 ### 修复
 
-- **`get_trading_dates` 每次调用都白烧 2 秒**（issue #160，@heimo88）：他看到的是策略启动后第一次 21.6s（SDK 冷初始化），我们实盘实测发现**每次调用都 ~2.1s**——`_native_or_context` 每个调用都先让原生 xtdata SDK 去拨它在大 QMT 里永远连不上的行情服务，超时报错后才回落 ContextInfo。而「SDK 在、行情服务不在」在大 QMT 进程里是**不会自愈的永久状态**。现在原生失败按函数名记住 600 秒，窗口内直接走 ContextInfo（成功一次即清除标记）；全部 15 个 `_native_or_context` 调用点受益（`get_holidays` 等含）。回归测试 5 个（修复前 4 个失败）。**生效需同步 QMT 端并重启策略**。
+- **`get_trading_dates` 每次调用都白烧 2 秒**（issue #160，@heimo88）：他看到的是策略启动后第一次 21.6s（SDK 冷初始化），我们实盘实测发现**每次调用都 ~2.1s**——`_native_or_context` 每个调用都先让原生 xtdata SDK 去拨它在大 QMT 里永远连不上的行情服务，超时报错后才回落 ContextInfo。而「SDK 在、行情服务不在」在大 QMT 进程里是**不会自愈的永久状态**。现在原生失败按函数名记住 600 秒，窗口内直接走 ContextInfo（成功一次即清除标记）；全部 15 个 `_native_or_context` 调用点受益（`get_holidays` 等含）。回归测试 5 个（修复前 4 个失败）。**生效需同步 QMT 端并重启策略**。**已实盘验证（0.3.16 + 本条部署后）**：reload 后首次 2.5s（最后一次 SDK 实拨），之后每次 **30-46ms**。
+
+- **`xt_trader.sync_deployment()` 从来是坏的**：它调 `self.get_deployment_info()`，而该方法只在 `BigQmtXtData` 上——trader 路径一调就 AttributeError（在部署 #160 时踩到）。改为直接走 `self.client.call("get_deployment_info")`。回归测试 2 个（修复前均失败）。
 
 
 ## [0.3.16] - 2026-09-03
