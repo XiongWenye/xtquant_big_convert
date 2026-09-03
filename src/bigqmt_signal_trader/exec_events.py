@@ -584,11 +584,16 @@ def publish_exec_event(sink, account_id, event):
 
 
 def _publish(redis_client, channel, event, maxlen=2000):
+    from .adapters.redis_common import note_stream_failure, streams_dead
+
     raw = json.dumps(event, ensure_ascii=False, default=str)
-    try:
-        redis_client.xadd(channel, {"payload": raw}, maxlen=maxlen, approximate=True)
-    except Exception:
-        pass
+    if not streams_dead():
+        try:
+            redis_client.xadd(channel, {"payload": raw}, maxlen=maxlen, approximate=True)
+        except Exception as exc:
+            # redis < 5.0 has no streams: log once, then skip xadd for good.
+            # Anything else stays silent and retried, as before (issue #163).
+            note_stream_failure(exc)
     redis_client.publish(channel, raw)
     return event
 

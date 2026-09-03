@@ -2124,6 +2124,9 @@ class BigQmtXtData:
     def download_holiday_data(self, incrementally=True):
         return self._call("download_holiday_data", incrementally=incrementally)
 
+    def download_his_st_data(self, incrementally=True):
+        return self._call("download_his_st_data", incrementally=incrementally)
+
     def get_ipo_info(self, start_time="", end_time=""):
         return self._call("get_ipo_info", start_time=start_time, end_time=end_time)
 

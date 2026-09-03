@@ -51,6 +51,7 @@ READ_METHODS = {
     "get_trading_dates",
     "get_holidays",
     "download_holiday_data",
+    "download_his_st_data",
     "get_ipo_info",
     "get_etf_info",
     "download_etf_info",
@@ -222,6 +223,7 @@ MARKET_DATA_METHODS = {
     "get_trading_dates",
     "get_holidays",
     "download_holiday_data",
+    "download_his_st_data",
     "get_ipo_info",
     "get_etf_info",
     "download_etf_info",
@@ -1446,6 +1448,30 @@ class BigQmtRpcHandlers:
             return self._handle_market_data_method("download_history_data2", params)
         except (NotImplementedError, AttributeError):
             return False
+
+    def _handle_download_holiday_data(self, params):
+        # MiniQMT downloads a holiday table from the xtdata service. Big QMT's
+        # terminal maintains the trading calendar itself (refreshed at login
+        # and by its own data updater), so there is nothing to download and no
+        # ContextInfo method to call -- the old generic path answered with
+        # NotImplementedError (issue #163). A clear no-op instead.
+        return {
+            "ok": True,
+            "downloaded": False,
+            "note": ("Big QMT maintains the trading calendar itself; nothing "
+                     "to download. get_trading_dates/get_holidays read the "
+                     "terminal's own data."),
+        }
+
+    def _handle_download_his_st_data(self, params):
+        # Same shape as download_holiday_data: ST history lives in the
+        # terminal's own data on Big QMT (issue #163).
+        return {
+            "ok": True,
+            "downloaded": False,
+            "note": ("Big QMT maintains ST history in the terminal's own data; "
+                     "nothing to download. get_his_st_data reads it directly."),
+        }
 
     def _order_action_from_params(self, params):
         action = str(params.get("action") or "").upper()
