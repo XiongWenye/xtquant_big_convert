@@ -1497,6 +1497,10 @@ def _exec_event_redis(config):
     Previously a new client was built per order/trade callback when the RPC
     service had none (the zmq-transport case), leaking a connection pool per
     event. Reuse one; build failure returns None so publishing just skips.
+
+    A non-Redis transport may retain a Redis block for optional download jobs
+    or exec-event replay. Skip that block only when both consumers are
+    explicitly disabled; omitted flags retain the legacy enabled behavior.
     """
     global _exec_event_redis_client
     existing = getattr(_rpc_service, "redis", None) if _rpc_service is not None else None
@@ -1504,6 +1508,10 @@ def _exec_event_redis(config):
         return existing
     if _exec_event_redis_client is not None:
         return _exec_event_redis_client
+    if not _config_bool((config.get("download_jobs") or {}).get("enabled"), True) and not _config_bool(
+        (config.get("exec_events") or {}).get("enabled"), True
+    ):
+        return None
     redis_config = dict(config.get("redis") or {})
     if not redis_config:
         return None
