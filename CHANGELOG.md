@@ -7,6 +7,10 @@
 
 ### 修复
 
+- **`order_stock_async` 排了队没发出去的委托随进程退出静默丢失**（issue #156，@kingtsi）：循环连发 async 下单后脚本立即退出——worker 是 daemon 线程，主线程一结束它就被掐死，队列里剩下的委托一笔都不发、没有任何报错；他的 sleep 只是在给进程续命。实盘复现（工行 100 股 ×3 深价单）：立即退出 3 笔只到 1 笔，`wait_async_orders()` + 宽限 3/3。
+
+  修复：`stop()` 和 atexit 钩子（首次 async 下单时注册）在退出前**排干队列**——等 worker 发完已排队的每一笔（有界 5s），再给在途响应 3s 宽限让 `on_order_stock_async_response` 触发。空队列零开销；全程不抛异常。修复后按报告人形态实测：立即退出也 3/3 到达且回调齐全。注意回调本身仍要求进程存活——要在脚本里看回调，得让进程活到回调到达（或显式 `wait_async_orders()`）。
+
 - **`test_all_apis.py` 在 zmq 部署下全挂**（issue #157，@simonfantasy）：脚本的 `_call` 只会 `call_redis_rpc`——zmq 配置下 ping 必超时、后面每个用例跟着挂，而桥本身是好的（报告人自己用 ZmqTransport 手动 ping 证明了）。现在脚本按配置构造统一调用器（zmq 走 `ZmqTransport`，信封与客户端 `call()` 一致），`redis` 改为懒导入（NO_REDIS_FLAT 无 redis 客户端库的部署也能跑）。实盘验证：本机 zmq 桥上全量 18 OK / 0 超时（`get_sector_list` 的 FAIL 是 #143 之后的诚实报错，`query_stock_position` 空为既有行为，均非本次引入）。
 
 
