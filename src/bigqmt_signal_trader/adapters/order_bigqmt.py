@@ -557,8 +557,16 @@ class BigQmtOrderGateway:
                     volume=int(_attr(row, ("m_nVolumeTotalOriginal", "volume"), 0) or 0),
                     traded_volume=int(_attr(row, ("m_nVolumeTraded", "traded_volume"), 0) or 0),
                     status=str(_attr(row, ("m_nOrderStatus", "status"), "") or ""),
+                    # The trade builder has this fallback and orders did not:
+                    # a query filtered by strategy_name returned rows that all
+                    # passed the filter yet reported strategy_name="" (issue
+                    # #156 follow-up). When a filter is given, every row
+                    # belongs to it by construction.
+                    strategy_name=str(
+                        _attr(row, ("m_strStrategyName", "strategy_name"), "")
+                        or strategy_name or ""
+                    ),
                     price=float(_attr(row, ("m_dLimitPrice", "m_dPrice", "price"), 0.0) or 0.0),
-                    strategy_name=str(_attr(row, ("m_strStrategyName", "strategy_name"), "") or ""),
                     remark=str(_attr(row, ("m_strRemark", "remark"), "") or ""),
                     order_time=_order_time_seconds(row),
                     status_msg=_status_message(row),

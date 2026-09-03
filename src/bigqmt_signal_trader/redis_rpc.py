@@ -34,6 +34,7 @@ READ_METHODS = {
     "ping",
     "get_deployment_info",
     "probe_capabilities",
+    "probe_order_identity",
     "get_ticks",
     "get_instrument",
     "get_instrument_type",
@@ -1448,6 +1449,45 @@ class BigQmtRpcHandlers:
             return self._handle_market_data_method("download_history_data2", params)
         except (NotImplementedError, AttributeError):
             return False
+
+    def _handle_probe_order_identity(self, params):
+        """Diagnose the strategy_name backfill chain, one link at a time.
+
+        #156's reporter: the identity record exists in Redis, the key matches,
+        and the query still reads strategy_name="". Nothing along the chain
+        can say which link dropped it from the outside -- this answers that
+        from the inside: is the identity Redis wired at all, does the key
+        exist under THIS account, is the local journal covering it (#156's
+        in-process fallback), and does the raw lookup raise.
+        """
+        account_id = self._request_account_id(params)
+        remark = str(params.get("remark") or params.get("user_order_id") or "").strip()
+        redis_client = self._identity_redis()
+        journal = getattr(self, "_order_identity_local", None) or {}
+        out = {
+            "account_id": account_id,
+            "remark": remark,
+            "identity_redis_wired": redis_client is not None,
+            "local_journal_size": len(journal),
+        }
+        if not remark:
+            out["note"] = "pass remark=<the order's remark> to check the key"
+            return out
+        from .exec_events import order_identity_key
+
+        key = order_identity_key(account_id, remark)
+        out["identity_key"] = key
+        if redis_client is not None:
+            try:
+                out["redis_hit"] = bool(redis_client.get(key))
+            except Exception as exc:
+                out["redis_hit"] = None
+                out["lookup_error"] = "%s: %s" % (exc.__class__.__name__, exc)
+        entry = journal.get((account_id, remark))
+        out["local_hit"] = bool(entry and entry[1])
+        if entry:
+            out["local_strategy_name"] = entry[1]
+        return out
 
     def _handle_download_holiday_data(self, params):
         # MiniQMT downloads a holiday table from the xtdata service. Big QMT's
