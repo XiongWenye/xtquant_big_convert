@@ -5,6 +5,11 @@
 
 ## [未发布]
 
+### 新增
+
+- **`deploy/` 一键 Windows 部署包**（PR #158，@karlthas007）：`deploy_qmt_bridge.ps1` 在全新 Windows 机器上一次完成——客户端环境（miniconda py3.13 或系统 python venv，pip/conda/Miniconda 默认清华镜像可切官方源）、服务端 4 项拷入 QMT、redis 5.0.14 注册为 Windows 服务（127.0.0.1 + 随机密码 + 192mb noeviction）、生成双侧配置；幂等可重跑，`-CheckOnly` 只读检查。附 `qmt_cli.py`（ping/资产/持仓/委托/成交/tick/kline/买卖/撤单/watch）。作者在江海证券大 QMT 实盘验证过全链路。**合并修正**：帮助文本里的示例账号改为占位符；生成的服务端配置默认 `rpc_allow_order_methods=False`（下单是显式人工决定，加 `-AllowOrders` 才开），与仓库安全默认一致；qmt_cli.py 缺配置时给明确指引而不是 ImportError。
+- **`contracts.py` 兼容无 typing_extensions 的 py3.6**（PR #159，@karlthas007）：`typing.Protocol`（3.8+）缺失时先退 typing_extensions，再退纯占位基类——QMT 内嵌 python36 没有这两个库。该模块当前无调用方（latent），此修复保住全 src 的 py3.6 可导入性。补了模拟 py3.6 环境的回归测试。
+
 ### 修复
 
 - **`get_trading_dates` 每次调用都白烧 2 秒**（issue #160，@heimo88）：他看到的是策略启动后第一次 21.6s（SDK 冷初始化），我们实盘实测发现**每次调用都 ~2.1s**——`_native_or_context` 每个调用都先让原生 xtdata SDK 去拨它在大 QMT 里永远连不上的行情服务，超时报错后才回落 ContextInfo。而「SDK 在、行情服务不在」在大 QMT 进程里是**不会自愈的永久状态**。现在原生失败按函数名记住 600 秒，窗口内直接走 ContextInfo（成功一次即清除标记）；全部 15 个 `_native_or_context` 调用点受益（`get_holidays` 等含）。回归测试 5 个（修复前 4 个失败）。**生效需同步 QMT 端并重启策略**。**已实盘验证（0.3.16 + 本条部署后）**：reload 后首次 2.5s（最后一次 SDK 实拨），之后每次 **30-46ms**。

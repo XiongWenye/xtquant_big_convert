@@ -34,6 +34,9 @@ powershell -ExecutionPolicy Bypass -File .\deploy_qmt_bridge.ps1 `
 **离线服务器**：先在别的机器下载 Redis zip，
 加参数 `-RedisZip "C:\temp\Redis-x64-5.0.14.zip"`（PyPI 下载仍需网络，或提前做好 venv 拷贝过去）。
 
+**下单默认关闭**：生成的服务端配置 `rpc_allow_order_methods=False`，新部署只应答查询；
+确认风控后加 `-AllowOrders` 重跑（或改配置为 True 并重启策略）才开放 buy/sell/cancel。
+
 ## 部署后只剩两步人工操作
 1. QMT → 模型交易 → 加载 `<QMT目录>\python\BIGQMT_REDIS_DRYRUN.py` → **运行模式切"实盘"** → 启动
 2. 验证（python 路径按所用路线二选一——`-Conda` 用第一行，系统 python venv 用第二行）：

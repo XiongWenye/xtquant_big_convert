@@ -6,10 +6,11 @@
   Target: 2C4G Windows server with Big QMT installed and logged in.
   Idempotent - safe to re-run. Skips completed steps.
 .PARAMETER QmtDir   Big QMT install root, e.g. C:\JianghaiQMT
-.PARAMETER Account  Capital account id (digits), e.g. 8886800503
+.PARAMETER Account  Capital account id (digits), e.g. 1234567890
 .PARAMETER WorkDir  Deployment root (default C:\qmt_bridge)
 .PARAMETER RedisZip Offline redis zip path; skip GitHub download when provided
 .PARAMETER Proxy    HTTP proxy for downloads, e.g. http://127.0.0.1:7897
+.PARAMETER AllowOrders  Enable order RPCs in the generated server config (off by default)
 #>
 param(
     [Parameter(Mandatory=$true)][string]$QmtDir,
@@ -18,6 +19,7 @@ param(
     [string]$RedisZip = "",
     [string]$Proxy = "",
     [switch]$CheckOnly,
+    [switch]$AllowOrders,
     [switch]$Conda,
     [string]$MinicondaUrl = "",
     [string]$PipIndex = "https://pypi.tuna.tsinghua.edu.cn/simple",
@@ -185,6 +187,10 @@ Ok ("redis service: " + (Get-Service RedisBigQMT).Status)
 
 # ---- 5. server-side config -------------------------------------------------
 Step "5/7 write server-side local config"
+# Order RPCs stay OFF unless -AllowOrders is given -- the repo's safety
+# default: a fresh bridge answers queries only, order placement is an
+# explicit human decision (qmt-trader SKILL.md 安全须知).
+$allowOrdersPy = if ($AllowOrders) { "True" } else { "False" }
 $localCfg = @"
 # coding: utf-8
 BIGQMT_ACCOUNT_ID = "$Account"
@@ -196,7 +202,7 @@ BIGQMT_REDIS_CONFIG = {
     "db": 5,
     "username": "",
     "password": "$pw",
-    "rpc_allow_order_methods": True,
+    "rpc_allow_order_methods": $allowOrdersPy,
     "rpc_process_in_listener": True,
     "rpc_listener_methods": ("*",),
     "rpc_background_threads": False,
@@ -267,3 +273,8 @@ Write-Host @"
 3. redis password saved at: $pwFile
 4. Memory budget on 2C4G: QMT ~1.5G + redis <=192M + python ~400M. Close QMT panels you do not use.
 "@ -ForegroundColor Yellow
+if ($AllowOrders) {
+    Write-Host "5. order RPCs: ENABLED (-AllowOrders). buy/sell/cancel will work." -ForegroundColor Yellow
+} else {
+    Write-Host "5. order RPCs: OFF (default). buy/sell/cancel answer ORDER_DISABLED; re-run with -AllowOrders or set rpc_allow_order_methods=True in $dst\bigqmt_signal_trader_local_config.py and restart the strategy." -ForegroundColor Yellow
+}

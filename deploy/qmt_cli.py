@@ -18,9 +18,9 @@ cancel. Usage examples:
     python qmt_cli.py cancel 1234
     python qmt_cli.py watch
 
-The account id is read from bigqmt_client_config.BIGQMT_ACCOUNT_ID, or from
---account / BIGQMT_ACCOUNT_ID env var. `discover` scans Redis for the account
-id the QMT-side strategy registered.
+The account id is read from bigqmt_signal_trader_client_config.BIGQMT_ACCOUNT_ID,
+or from --account / BIGQMT_ACCOUNT_ID env var. `discover` scans Redis for the
+account id the QMT-side strategy registered.
 """
 import argparse
 import json
@@ -30,7 +30,10 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import bigqmt_signal_trader_client_config as cfg  # noqa: E402
+try:
+    import bigqmt_signal_trader_client_config as cfg  # noqa: E402
+except ImportError:  # config not written yet (e.g. pre-deploy discover)
+    cfg = None
 
 from bigqmt_signal_trader.xtquant_compat import (  # noqa: E402
     BigQmtRpcClient,
@@ -51,13 +54,20 @@ def account_id(args):
     value = str(value or "").strip()
     if not value:
         sys.exit(
-            "account id is empty: run `qmt_cli.py discover` first, then set "
-            "BIGQMT_ACCOUNT_ID in bigqmt_client_config.py"
+            "account id is empty: set BIGQMT_ACCOUNT_ID in "
+            "bigqmt_signal_trader_client_config.py, or pass --account, "
+            "or export BIGQMT_ACCOUNT_ID"
         )
     return value
 
 
 def redis_kwargs():
+    if cfg is None:
+        sys.exit(
+            "bigqmt_signal_trader_client_config.py not found next to this "
+            "script -- run deploy_qmt_bridge.ps1 first, or create it with "
+            "BIGQMT_REDIS_CONFIG (see deploy/README.md)"
+        )
     return dict(cfg.BIGQMT_REDIS_CONFIG)
 
 
