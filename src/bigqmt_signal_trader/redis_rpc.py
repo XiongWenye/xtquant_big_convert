@@ -136,6 +136,7 @@ LISTENER_DEFERRED_METHODS = {
     "query_stock_position",
     "query_orders",
     "query_trades",
+    "query_execution_snapshot",
     "describe_trade_detail_fields",
     "reload_deployment",
     "query_account_infos",
