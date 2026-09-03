@@ -5,6 +5,14 @@
 
 ## [未发布]
 
+### 修复
+
+- **一笔委托触发两次「已报」回调，第一次还是残缺事件**（issue #161，@sumo225270）：QMT 在委托行出现时和 `m_strOrderSysID` 填上后各触发一次 order_callback（#152 的同一窗口），客户端于是看到两条一样的「已报」，第一条无委托号（order_id=0）。现在无委托号的委托事件**扣留 0.8 秒**：带号孪生到达即丢弃（只发一次完整事件），没来则由 adjust 循环补发（不丢事件）。扣留窗口可用 `exec_events_hold_presysid_seconds` 配置，设 0 恢复旧行为。实盘验证（国金 2.1.19.0）：废单路径从「50 无号 + 57 带号」两条变 1 条完整事件。**已报-已报的去重形状需开盘时段复验**（当前已过收盘，只能走废单路径）。
+
+- **回调事件缺 `instrument_name`**（issue #161）：事件规范化没带这个字段。现在 QMT 对象自带就用自带的，没有则服务端用 ContextInfo 查一次并缓存（同一代码只查一次），委托/成交事件都带上。客户端 `order.instrument_name` / `trade.instrument_name` 直接可用。实盘验证：`name='工商银行'` ✓。
+
+  顺带说明报告人的第三问：**QMT 界面手动下的单 strategy_name 永远为空**——手动单没有 remark，身份库无从关联，而 QMT 委托/成交行本身不携带策略名（#133）。KPI 分析建议按「remark 为空」归入手动桶。
+
 ### 新增
 
 - **`deploy/` 一键 Windows 部署包**（PR #158，@karlthas007）：`deploy_qmt_bridge.ps1` 在全新 Windows 机器上一次完成——客户端环境（miniconda py3.13 或系统 python venv，pip/conda/Miniconda 默认清华镜像可切官方源）、服务端 4 项拷入 QMT、redis 5.0.14 注册为 Windows 服务（127.0.0.1 + 随机密码 + 192mb noeviction）、生成双侧配置；幂等可重跑，`-CheckOnly` 只读检查。附 `qmt_cli.py`（ping/资产/持仓/委托/成交/tick/kline/买卖/撤单/watch）。作者在江海证券大 QMT 实盘验证过全链路。**合并修正**：帮助文本里的示例账号改为占位符；生成的服务端配置默认 `rpc_allow_order_methods=False`（下单是显式人工决定，加 `-AllowOrders` 才开），与仓库安全默认一致；qmt_cli.py 缺配置时给明确指引而不是 ImportError。
